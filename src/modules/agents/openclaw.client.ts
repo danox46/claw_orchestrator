@@ -38,15 +38,6 @@ const OPENCLAW_ROUTES = {
   responses: "/v1/responses",
 } as const;
 
-const SUPPORTED_PLANNED_TASK_INTENTS = [
-  "design_architecture",
-  "generate_scaffold",
-  "implement_feature",
-  "run_tests",
-  "review_security",
-  "prepare_staging",
-] as const;
-
 export type OpenClawSessionRecord = {
   sessionId: string;
   agentId: string;
@@ -121,6 +112,30 @@ export type OpenClawWaitForTaskInput = {
   timeoutMs?: number;
 };
 
+export type OpenClawPromptBuildInput = {
+  agentId: string;
+  payload: OpenClawTaskPayload;
+};
+
+export interface OpenClawPromptServicePort {
+  buildResponsesPrompt(input: OpenClawPromptBuildInput): string;
+}
+
+type OpenClawPlanningPromptServicePort = OpenClawPromptServicePort & {
+  buildProjectPhasePlanningPromptFromPayload?: (
+    input: OpenClawPromptBuildInput,
+  ) => string;
+  buildMilestoneTaskPlanningPromptFromPayload?: (
+    input: OpenClawPromptBuildInput,
+  ) => string;
+};
+
+export type OpenClawClientDependencies = {
+  promptService: OpenClawPromptServicePort;
+  httpClient?: AxiosInstance;
+  resultParser?: AgentResultParser;
+};
+
 type ToolsInvokeResponse<T = unknown> = {
   ok?: boolean;
   result?: T;
@@ -133,10 +148,13 @@ type ToolsInvokeResponse<T = unknown> = {
 export class OpenClawClient {
   private readonly http: AxiosInstance;
   private readonly resultParser: AgentResultParser;
+  private readonly promptService: OpenClawPromptServicePort;
 
-  constructor(httpClient?: AxiosInstance, resultParser?: AgentResultParser) {
+  constructor(dependencies: OpenClawClientDependencies) {
+    this.promptService = dependencies.promptService;
+
     this.http =
-      httpClient ??
+      dependencies.httpClient ??
       axios.create({
         baseURL: env.openclaw.baseUrl,
         timeout: env.openclaw.timeoutMs,
@@ -151,7 +169,7 @@ export class OpenClawClient {
         },
       });
 
-    this.resultParser = resultParser ?? new AgentResultParser();
+    this.resultParser = dependencies.resultParser ?? new AgentResultParser();
   }
 
   async healthcheck(): Promise<{
@@ -252,7 +270,10 @@ export class OpenClawClient {
         {
           model: input.agentId ? `openclaw/${input.agentId}` : "openclaw",
           user: sessionId,
-          input: this.buildResponsesPrompt(input.payload),
+          input: this.buildPromptForPayload({
+            agentId: input.agentId,
+            payload: input.payload,
+          }),
         },
         {
           headers: {},
@@ -345,6 +366,77 @@ export class OpenClawClient {
         openclawTaskId: input.openclawTaskId,
       },
     });
+  }
+
+  private buildPromptForPayload(input: OpenClawPromptBuildInput): string {
+    const intent = this.readIntent(input.payload.intent);
+
+    if (intent === "plan_project_phases") {
+      return (
+        this.invokeSpecificPlanningPrompt(
+          "buildProjectPhasePlanningPromptFromPayload",
+          input,
+        ) ?? this.promptService.buildResponsesPrompt(input)
+      );
+    }
+
+    if (intent === "plan_phase_tasks") {
+      return (
+        this.invokeSpecificPlanningPrompt(
+          "buildMilestoneTaskPlanningPromptFromPayload",
+          input,
+        ) ?? this.promptService.buildResponsesPrompt(input)
+      );
+    }
+
+    return this.promptService.buildResponsesPrompt(input);
+  }
+
+  private invokeSpecificPlanningPrompt(
+    methodName:
+      | "buildProjectPhasePlanningPromptFromPayload"
+      | "buildMilestoneTaskPlanningPromptFromPayload",
+    input: OpenClawPromptBuildInput,
+  ): string | undefined {
+    const planningPromptService = this
+      .promptService as unknown as OpenClawPlanningPromptServicePort;
+    const candidate = planningPromptService[methodName];
+
+    if (typeof candidate !== "function") {
+      return undefined;
+    }
+
+    try {
+      return candidate.call(this.promptService, input);
+    } catch (error) {
+      logger.warn(
+        {
+          methodName,
+          intent: input.payload.intent,
+          agentId: input.agentId,
+          error:
+            error instanceof Error
+              ? {
+                  name: error.name,
+                  message: error.message,
+                }
+              : error,
+        },
+        "Specific planning prompt builder failed. Falling back to generic prompt routing.",
+      );
+
+      return undefined;
+    }
+  }
+
+  private readIntent(intent: string | undefined): string | undefined {
+    if (typeof intent !== "string") {
+      return undefined;
+    }
+
+    const trimmed = intent.trim();
+
+    return trimmed.length > 0 ? trimmed : undefined;
   }
 
   async request<TResponse = unknown>(
@@ -460,442 +552,6 @@ export class OpenClawClient {
         : "session";
 
     return `orchestrator:${env.app.name}:agent:${input.agentId}:${titlePart}:${randomUUID()}`;
-  }
-
-  private buildResponsesPrompt(payload: OpenClawTaskPayload): string {
-    switch (payload.intent) {
-      case "plan_project_phases":
-        return this.buildProjectPhasePlanningPrompt(payload);
-      case "plan_phase_tasks":
-      case "plan_next_tasks":
-        return this.buildMilestoneTaskPlanningPrompt(payload);
-      default:
-        return this.buildStandardExecutionPrompt(payload);
-    }
-  }
-
-  private buildProjectPhasePlanningPrompt(
-    payload: OpenClawTaskPayload,
-  ): string {
-    const projectRequest = this.extractProjectRequest(payload.inputs);
-    const projectName = this.readOptionalString(payload.inputs, [
-      "projectName",
-    ]);
-    const appType = this.readOptionalString(payload.inputs, ["appType"]);
-    const stack = this.asRecord(payload.inputs.stack);
-    const deployment = this.asRecord(payload.inputs.deployment);
-
-    const contextLines: string[] = [];
-
-    if (projectName) {
-      contextLines.push(`- Project name: ${projectName}`);
-    }
-
-    if (appType) {
-      contextLines.push(`- App type: ${appType}`);
-    }
-
-    if (
-      typeof stack.frontend === "string" &&
-      stack.frontend.trim().length > 0
-    ) {
-      contextLines.push(`- Frontend: ${stack.frontend}`);
-    }
-
-    if (typeof stack.backend === "string" && stack.backend.trim().length > 0) {
-      contextLines.push(`- Backend: ${stack.backend}`);
-    }
-
-    if (
-      typeof stack.database === "string" &&
-      stack.database.trim().length > 0
-    ) {
-      contextLines.push(`- Database: ${stack.database}`);
-    }
-
-    if (
-      typeof deployment.target === "string" &&
-      deployment.target.trim().length > 0
-    ) {
-      contextLines.push(`- Deployment target: ${deployment.target}`);
-    }
-
-    if (
-      typeof deployment.environment === "string" &&
-      deployment.environment.trim().length > 0
-    ) {
-      contextLines.push(`- Environment: ${deployment.environment}`);
-    }
-
-    return [
-      "Return only valid JSON.",
-      "",
-      `Use this exact envelope: {"taskId":"${payload.taskId}","status":"succeeded|failed","summary":"","outputs":{},"artifacts":[],"errors":[]}`,
-      "",
-      ...this.buildRetryContextSection(payload),
-      ...(this.hasRetryContext(payload) ? [""] : []),
-      "You are planning the ordered project phases for a software project.",
-      "",
-      "Your job:",
-      "- define the milestone/phase plan for this project",
-      "- return phases only",
-      "- do not create execution tasks yet",
-      "- keep the phases practical, ordered, and implementation-ready",
-      "",
-      "Project request:",
-      projectRequest ?? "No explicit project request was provided.",
-      "",
-      ...(contextLines.length > 0
-        ? ["Relevant context:", ...contextLines, ""]
-        : []),
-      "Planning requirements:",
-      "- outputs.phases must be a non-empty ordered array",
-      "- phases must be sequential and practical",
-      "- each phase must have phaseId, name, goal, description, dependsOn, deliverables, and exitCriteria",
-      "- do not create tasks",
-      "- do not include unrelated phases",
-      "- make the phases ready for downstream task planning",
-      "",
-      "Phase format:",
-      JSON.stringify(
-        {
-          phaseId: "phase-1",
-          name: "Foundation",
-          goal: "Short goal for this milestone",
-          description: "Short description",
-          dependsOn: [],
-          deliverables: ["deliverable-1"],
-          exitCriteria: ["criterion-1"],
-        },
-        null,
-        2,
-      ),
-    ].join("\n");
-  }
-
-  private buildMilestoneTaskPlanningPrompt(
-    payload: OpenClawTaskPayload,
-  ): string {
-    const projectName = this.readOptionalString(payload.inputs, [
-      "projectName",
-    ]);
-    const milestoneProjectRequest = this.extractMilestoneProjectRequest(
-      payload.inputs,
-    );
-    const phaseName = this.readOptionalString(payload.inputs, ["phaseName"]);
-    const phaseGoal = this.readOptionalString(payload.inputs, ["phaseGoal"]);
-    const phaseRecord = this.asRecord(payload.inputs.phase);
-    const phaseDescription =
-      this.readOptionalString(phaseRecord, ["description"]) ??
-      this.readOptionalString(payload.inputs, ["phaseDescription"]);
-
-    const contextLines: string[] = [];
-
-    if (projectName) {
-      contextLines.push(`- Project name: ${projectName}`);
-    }
-
-    if (phaseName) {
-      contextLines.push(`- Milestone: ${phaseName}`);
-    }
-
-    if (phaseGoal) {
-      contextLines.push(`- Milestone goal: ${phaseGoal}`);
-    }
-
-    if (phaseDescription) {
-      contextLines.push(`- Milestone description: ${phaseDescription}`);
-    }
-
-    return [
-      "Return only valid JSON.",
-      "",
-      `Use this exact envelope: {"taskId":"${payload.taskId}","status":"succeeded|failed","summary":"","outputs":{},"artifacts":[],"errors":[]}`,
-      "",
-      ...this.buildRetryContextSection(payload),
-      ...(this.hasRetryContext(payload) ? [""] : []),
-      "You are planning the executable tasks for one milestone.",
-      "",
-      "Your job:",
-      "- break the milestone into ordered executable tasks",
-      "- include dependencies only where needed",
-      "- every task must include acceptanceCriteria",
-      "- every task must include inputs.testingCriteria for QA review",
-      "- do not plan outside the current milestone",
-      "- do not return phases or milestone definitions",
-      "- do not repeat the project-level planning step",
-      "",
-      ...(milestoneProjectRequest
-        ? ["Original project request:", milestoneProjectRequest, ""]
-        : []),
-      ...(contextLines.length > 0
-        ? ["Relevant context:", ...contextLines, ""]
-        : []),
-      "Planning requirements:",
-      "- outputs.tasks must be a non-empty ordered array",
-      `- use only supported intents: ${SUPPORTED_PLANNED_TASK_INTENTS.join(", ")}`,
-      "- each task must include localId",
-      "- each task must include inputs.prompt",
-      "- each task must include inputs.testingCriteria as a non-empty array",
-      "- each task must include acceptanceCriteria as a non-empty array",
-      "- use dependsOn with prior localId values when needed",
-      "- produce only executable tasks for this milestone based on the milestone context above",
-      "",
-      "Task format:",
-      JSON.stringify(
-        {
-          localId: "task-1",
-          intent: "implement_feature",
-          target: {
-            agentId: "implementer",
-          },
-          inputs: {
-            prompt: "Implement the requested milestone work.",
-            testingCriteria: ["expected behavior 1", "expected behavior 2"],
-          },
-          constraints: {
-            toolProfile: "implementer-safe",
-            sandbox: "non-main",
-          },
-          requiredArtifacts: [],
-          acceptanceCriteria: ["criterion-1"],
-          dependsOn: [],
-        },
-        null,
-        2,
-      ),
-    ].join("\n");
-  }
-
-  private hasRetryContext(payload: OpenClawTaskPayload): boolean {
-    return (
-      (Array.isArray(payload.errors) && payload.errors.length > 0) ||
-      (typeof payload.lastError === "string" &&
-        payload.lastError.trim().length > 0) ||
-      typeof payload.attemptNumber === "number" ||
-      (this.isRecord(payload.outputs) &&
-        Object.keys(payload.outputs).length > 0) ||
-      (Array.isArray(payload.artifacts) && payload.artifacts.length > 0)
-    );
-  }
-
-  private buildRetryContextSection(payload: OpenClawTaskPayload): string[] {
-    if (!this.hasRetryContext(payload)) {
-      return [];
-    }
-
-    const lines: string[] = [
-      "Retry context:",
-      "- This task may be a retry. Use the previous attempt context below to avoid repeating the same failure.",
-    ];
-
-    if (typeof payload.attemptNumber === "number") {
-      if (typeof payload.maxAttempts === "number") {
-        lines.push(
-          `- Current attempt: ${payload.attemptNumber} of ${payload.maxAttempts}.`,
-        );
-      } else {
-        lines.push(`- Current attempt: ${payload.attemptNumber}.`);
-      }
-    }
-
-    const previousErrors = this.normalizeStringList(payload.errors);
-    const lastError =
-      typeof payload.lastError === "string" ? payload.lastError.trim() : "";
-
-    if (lastError.length > 0) {
-      lines.push(`- Last error: ${lastError}`);
-    }
-
-    if (previousErrors.length > 0) {
-      lines.push("- Previous error messages:");
-      lines.push(...previousErrors.map((message) => `  - ${message}`));
-    }
-
-    const previousOutputs = this.isRecord(payload.outputs)
-      ? payload.outputs
-      : undefined;
-
-    if (previousOutputs && Object.keys(previousOutputs).length > 0) {
-      lines.push("- Previous outputs:");
-      lines.push(this.toPrettyJson(previousOutputs, 2));
-    }
-
-    const previousArtifacts = this.normalizeStringList(payload.artifacts);
-
-    if (previousArtifacts.length > 0) {
-      lines.push("- Previous artifacts:");
-      lines.push(...previousArtifacts.map((artifact) => `  - ${artifact}`));
-    }
-
-    lines.push(
-      "- Fix the underlying issue from the prior attempt. Do not ignore the previous errors.",
-    );
-
-    return lines;
-  }
-
-  private buildStandardExecutionPrompt(payload: OpenClawTaskPayload): string {
-    const authoredPrompt = this.extractAuthoredPrompt(payload.inputs);
-    const acceptanceCriteria =
-      payload.acceptanceCriteria?.filter((item) => item.trim().length > 0) ??
-      [];
-    const testingCriteria = this.extractTestingCriteria(payload.inputs);
-
-    const sections: string[] = [
-      "Return only valid JSON.",
-      "",
-      "Always keep in mind that the project path is /home/danox/.openclaw/workspace-shared",
-      "",
-      `Use this exact envelope: {"taskId":"${payload.taskId}","status":"succeeded|failed","summary":"","outputs":{},"artifacts":[],"errors":[]}`,
-      "",
-      ...this.buildRetryContextSection(payload),
-      ...(this.hasRetryContext(payload) ? [""] : []),
-      "Complete the assigned task described below.",
-      "",
-      "Task instruction:",
-      authoredPrompt ?? "No explicit task instruction was provided.",
-    ];
-
-    if (acceptanceCriteria.length > 0) {
-      sections.push(
-        "",
-        "Acceptance criteria:",
-        ...acceptanceCriteria.map((criterion) => `- ${criterion}`),
-      );
-    }
-
-    if (testingCriteria.length > 0) {
-      sections.push(
-        "",
-        "Testing criteria for QA review:",
-        ...testingCriteria.map((criterion) => `- ${criterion}`),
-      );
-    }
-
-    sections.push(
-      "",
-      "Output rules:",
-      "- put structured result details in outputs",
-      "- include artifact references only if something was actually created",
-      '- if the task cannot be completed, set status to "failed" and explain why in errors',
-    );
-
-    return sections.join("\n");
-  }
-
-  private extractProjectRequest(
-    inputs: Record<string, unknown>,
-  ): string | undefined {
-    const dedicatedKeys = [
-      "projectRequest",
-      "request",
-      "userRequest",
-      "productRequest",
-      "spec",
-      "brief",
-    ];
-
-    for (const key of dedicatedKeys) {
-      const value = inputs[key];
-
-      if (typeof value === "string" && value.trim().length > 0) {
-        return value.trim();
-      }
-    }
-
-    return this.extractAuthoredPrompt(inputs);
-  }
-
-  private extractMilestoneProjectRequest(
-    inputs: Record<string, unknown>,
-  ): string | undefined {
-    const safeKeys = [
-      "projectRequest",
-      "request",
-      "userRequest",
-      "productRequest",
-      "spec",
-      "brief",
-    ];
-
-    for (const key of safeKeys) {
-      const value = inputs[key];
-
-      if (typeof value === "string" && value.trim().length > 0) {
-        return value.trim();
-      }
-    }
-
-    return undefined;
-  }
-
-  private extractAuthoredPrompt(
-    inputs: Record<string, unknown>,
-  ): string | undefined {
-    const promptKeys = [
-      "prompt",
-      "taskPrompt",
-      "instruction",
-      "instructions",
-      "ownerPrompt",
-      "pmPrompt",
-      "phasePrompt",
-      "implementationPrompt",
-      "qaPrompt",
-      "description",
-      "summary",
-    ];
-
-    for (const key of promptKeys) {
-      const value = inputs[key];
-
-      if (typeof value === "string" && value.trim().length > 0) {
-        return value.trim();
-      }
-    }
-
-    return undefined;
-  }
-
-  private extractTestingCriteria(inputs: Record<string, unknown>): string[] {
-    const direct = inputs.testingCriteria;
-
-    if (Array.isArray(direct)) {
-      return direct
-        .filter((item): item is string => typeof item === "string")
-        .map((item) => item.trim())
-        .filter((item) => item.length > 0);
-    }
-
-    return [];
-  }
-
-  private normalizeStringList(value: unknown): string[] {
-    if (!Array.isArray(value)) {
-      return [];
-    }
-
-    return value
-      .filter((item): item is string => typeof item === "string")
-      .map((item) => item.trim())
-      .filter((item) => item.length > 0);
-  }
-
-  private toPrettyJson(value: unknown, indent = 0): string {
-    const normalizedIndent =
-      Number.isInteger(indent) && indent > 0 ? indent : 0;
-    const prefix = " ".repeat(normalizedIndent);
-
-    try {
-      const json = JSON.stringify(value, null, 2);
-      return json
-        .split("\n")
-        .map((line) => `${prefix}${line}`)
-        .join(",");
-    } catch {
-      return `${prefix}${String(value)}`;
-    }
   }
 
   private extractResponseText(

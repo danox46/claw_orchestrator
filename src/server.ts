@@ -8,6 +8,7 @@ import { StateMachine } from "./modules/jobs/state-machine";
 import { MilestoneService } from "./modules/milestones/milestone.service";
 import { ProjectService } from "./modules/projects/project.service";
 import { TaskService } from "./modules/tasks/task.service";
+import { PromptService } from "./modules/prompts/prompt.service";
 import OpenClawClient from "./modules/agents/openclaw.client";
 import AgentDispatchService from "./modules/agents/agent-dispatch.service";
 
@@ -36,8 +37,10 @@ async function bootstrap(): Promise<void> {
   const jobsService = new JobService();
   const milestonesService = new MilestoneService();
   const tasksService = new TaskService();
+  const promptService = new PromptService();
 
   const intakeService = new IntakeService({
+    promptService,
     projectsService,
     jobsService,
     milestonesService,
@@ -45,7 +48,7 @@ async function bootstrap(): Promise<void> {
   });
 
   const stateMachine = new StateMachine();
-  const openClawClient = new OpenClawClient();
+  const openClawClient = new OpenClawClient({ promptService });
 
   const agentDispatchService = new AgentDispatchService({
     openClawClient,

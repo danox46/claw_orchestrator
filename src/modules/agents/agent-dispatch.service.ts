@@ -133,7 +133,10 @@ export class AgentDispatchService {
       return;
     }
 
-    const attemptNumber = task.attemptCount + 1;
+    const isQaDispatch = task.status === "qa";
+    const attemptNumber = isQaDispatch
+      ? Math.max(task.attemptCount, 1)
+      : task.attemptCount + 1;
 
     const dispatchLogger = logger.child({
       jobId: job._id,
@@ -150,7 +153,13 @@ export class AgentDispatchService {
     dispatchLogger.info("Dispatching task to OpenClaw.");
 
     try {
-      await this.tasksService.markRunning(task._id);
+      if (isQaDispatch) {
+        await this.tasksService.updateTask(task._id, {
+          status: "running",
+        });
+      } else {
+        await this.tasksService.markRunning(task._id);
+      }
 
       const sendResult = await this.openClawClient.sendTask({
         agentId: task.target.agentId,
@@ -471,6 +480,8 @@ export class AgentDispatchService {
         await this.createMilestonesAndPlannerTasks(input);
         return;
       case "plan_phase_tasks":
+        await this.enqueueConcreteMilestoneTasks(input);
+        return;
       case "plan_next_tasks":
         await this.enqueueConcreteMilestoneTasks(input);
         return;

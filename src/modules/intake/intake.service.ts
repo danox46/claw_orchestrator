@@ -36,11 +36,40 @@ export type CreateJobMetadata = {
   deployment: IntakeDeployment;
 };
 
+export type ProjectPhasePlanningPromptInput = {
+  projectName: string;
+  userPrompt: string;
+  appType?: IntakeAppType;
+  stack?: IntakeStack;
+  deployment?: IntakeDeployment;
+};
+
+export type MilestoneTaskPlanningPromptInput = {
+  projectName: string;
+  milestoneTitle: string;
+  milestoneGoal?: string;
+  milestoneDescription?: string;
+  milestoneScope?: string[];
+  milestoneAcceptanceCriteria?: string[];
+  projectSummary?: string;
+  userPrompt?: string;
+};
+
+export interface IntakePromptServicePort {
+  buildProjectPhasePlanningPrompt(
+    input: ProjectPhasePlanningPromptInput,
+  ): string;
+  buildMilestoneTaskPlanningPrompt?(
+    input: MilestoneTaskPlanningPromptInput,
+  ): string;
+}
+
 export type IntakeServiceDependencies = {
   projectsService: ProjectsServicePort;
   jobsService: JobsServicePort;
   milestonesService: MilestonesServicePort;
   tasksService: TasksServicePort;
+  promptService: IntakePromptServicePort;
   ownerAgentId?: string;
   defaultRepoMode?: "local" | "github";
   defaultSandboxMode?: "off" | "non-main" | "all";
@@ -54,6 +83,7 @@ export class IntakeService implements IntakeServicePort {
   private readonly jobsService: JobsServicePort;
   private readonly milestonesService: MilestonesServicePort;
   private readonly tasksService: TasksServicePort;
+  private readonly promptService: IntakePromptServicePort;
   private readonly ownerAgentId: string;
   private readonly defaultRepoMode: "local" | "github";
   private readonly defaultSandboxMode: "off" | "non-main" | "all";
@@ -66,6 +96,7 @@ export class IntakeService implements IntakeServicePort {
     this.jobsService = dependencies.jobsService;
     this.milestonesService = dependencies.milestonesService;
     this.tasksService = dependencies.tasksService;
+    this.promptService = dependencies.promptService;
     this.ownerAgentId = dependencies.ownerAgentId ?? "project-owner";
     this.defaultRepoMode = dependencies.defaultRepoMode ?? "local";
     this.defaultSandboxMode = dependencies.defaultSandboxMode ?? "non-main";
@@ -144,6 +175,9 @@ export class IntakeService implements IntakeServicePort {
     const ownerPlanningPrompt = this.buildOwnerPlanningPrompt({
       projectName,
       userPrompt,
+      appType: input.appType,
+      stack: input.stack,
+      deployment: input.deployment,
     });
 
     const planningTaskInput: CreateTaskInput = {
@@ -193,22 +227,10 @@ export class IntakeService implements IntakeServicePort {
     };
   }
 
-  private buildOwnerPlanningPrompt(input: {
-    projectName: string;
-    userPrompt: string;
-  }): string {
-    return [
-      "Plan the ordered project phases for this software project.",
-      "",
-      "Return only milestone/phase planning.",
-      "Do not create execution tasks yet.",
-      "Keep the phases practical, sequential, and ready for downstream task planning.",
-      "",
-      `Project name: ${input.projectName}`,
-      "",
-      "Project request:",
-      input.userPrompt,
-    ].join("\n");
+  private buildOwnerPlanningPrompt(
+    input: ProjectPhasePlanningPromptInput,
+  ): string {
+    return this.promptService.buildProjectPhasePlanningPrompt(input);
   }
 
   private buildProjectSlug(name: string): string {
