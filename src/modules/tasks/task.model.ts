@@ -148,6 +148,7 @@ const taskSchema = new Schema(
         "plan_project_phases",
         "plan_phase_tasks",
         "plan_next_tasks",
+        "review_milestone",
       ],
       required: true,
       index: true,

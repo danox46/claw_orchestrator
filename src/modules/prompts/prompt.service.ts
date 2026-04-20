@@ -264,6 +264,14 @@ export class PromptService {
       );
     }
 
+    if (explicitIntent === "review_milestone") {
+      return this.buildMilestoneReviewPromptFromPayload(
+        normalizedInput,
+        constraints,
+        retry,
+      );
+    }
+
     if (!explicitIntent) {
       if (this.shouldUseProjectPhasePlanningPrompt(normalizedPayload.inputs)) {
         return this.buildProjectPhasePlanningPromptFromPayload(
@@ -275,6 +283,14 @@ export class PromptService {
 
       if (this.shouldUseMilestoneTaskPlanningPrompt(normalizedPayload.inputs)) {
         return this.buildMilestoneTaskPlanningPromptFromPayload(
+          normalizedInput,
+          constraints,
+          retry,
+        );
+      }
+
+      if (this.shouldUseMilestoneReviewPrompt(normalizedPayload.inputs)) {
+        return this.buildMilestoneReviewPromptFromPayload(
           normalizedInput,
           constraints,
           retry,
@@ -575,6 +591,184 @@ export class PromptService {
     return this.buildMilestoneTaskPlanningPromptFromPayload(input, constraints);
   }
 
+  public buildMilestoneReviewPromptFromPayload(
+    input: OpenClawPromptBuildInput,
+    constraints?: string[],
+    _retry?: PromptRetryInput,
+  ): string {
+    const payloadInputs = input.payload.inputs;
+    const retry = this.buildRetryInput(input.payload);
+    const milestone = this.readRecord(payloadInputs.milestone);
+    const phase = this.readRecord(payloadInputs.phase);
+    const reviewContract = this.readRecord(payloadInputs.reviewContract);
+    const milestoneExecution = this.readRecord(
+      payloadInputs.milestoneExecution,
+    );
+
+    const projectName =
+      this.readString(payloadInputs.projectName) ?? "Unnamed Project";
+    const projectBrief = this.readMilestoneReviewProjectBrief(payloadInputs);
+    const milestoneId =
+      this.readString(payloadInputs.milestoneId) ??
+      this.readString(payloadInputs._id) ??
+      this.readString(payloadInputs.id) ??
+      this.readString(milestone?._id) ??
+      this.readString(milestone?.milestoneId) ??
+      this.readString(milestone?.id);
+    const milestoneTitle =
+      this.readString(payloadInputs.milestoneTitle) ??
+      this.readString(payloadInputs.title) ??
+      this.readString(milestone?.title) ??
+      this.readString(milestone?.name) ??
+      "Unnamed Milestone";
+    const milestoneGoal =
+      this.readString(payloadInputs.milestoneGoal) ??
+      this.readString(payloadInputs.goal) ??
+      this.readString(milestone?.goal);
+    const milestoneDescription =
+      this.readString(payloadInputs.milestoneDescription) ??
+      this.readString(payloadInputs.description) ??
+      this.readString(milestone?.description);
+    const milestoneOrder =
+      this.readNumber(payloadInputs.milestoneOrder) ??
+      this.readNumber(payloadInputs.order) ??
+      this.readNumber(milestone?.order);
+    const milestoneStatus =
+      this.readString(payloadInputs.milestoneStatus) ??
+      this.readString(payloadInputs.status) ??
+      this.readString(milestone?.status);
+    const dependsOnMilestoneId =
+      this.readString(payloadInputs.dependsOnMilestoneId) ??
+      this.readString(milestone?.dependsOnMilestoneId);
+
+    const milestoneScopeInput = this.readStringArray(
+      payloadInputs.milestoneScope,
+    );
+    const milestoneScope =
+      milestoneScopeInput.length > 0
+        ? milestoneScopeInput
+        : this.readStringArray(payloadInputs.scope).length > 0
+          ? this.readStringArray(payloadInputs.scope)
+          : this.readStringArray(milestone?.scope);
+
+    const milestoneAcceptanceInput = this.readStringArray(
+      payloadInputs.milestoneAcceptanceCriteria,
+    );
+    const milestoneAcceptanceCriteria =
+      milestoneAcceptanceInput.length > 0
+        ? milestoneAcceptanceInput
+        : this.readStringArray(payloadInputs.acceptanceCriteria).length > 0
+          ? this.readStringArray(payloadInputs.acceptanceCriteria)
+          : this.readStringArray(milestone?.acceptanceCriteria);
+
+    const phaseId =
+      this.readString(payloadInputs.phaseId) ??
+      this.readString(phase?.phaseId) ??
+      this.readString(phase?.id);
+    const phaseName =
+      this.readString(payloadInputs.phaseName) ??
+      this.readString(phase?.name) ??
+      "Milestone Review";
+    const phaseGoal =
+      this.readString(payloadInputs.phaseGoal) ?? this.readString(phase?.goal);
+
+    const reviewEvidence = this.readRecordArray(
+      milestoneExecution?.tasks ?? payloadInputs.milestoneExecution,
+    );
+    const completedTaskCount =
+      this.readNumber(payloadInputs.completedTaskCount) ??
+      this.readNumber(milestoneExecution?.completedTaskCount) ??
+      reviewEvidence.length;
+    const allowedDecisions = this.readStringArray(
+      reviewContract?.allowedDecisions ?? payloadInputs.reviewDecisionOptions,
+    );
+    const reviewDecisionOptions =
+      allowedDecisions.length > 0 ? allowedDecisions : ["pass", "patch"];
+    const patchRule =
+      this.readString(reviewContract?.patchRule) ??
+      this.readString(payloadInputs.patchRule);
+
+    const details = [
+      `Project name: ${projectName}`,
+      ...this.optionalLine("Milestone id", milestoneId),
+      `Milestone title: ${milestoneTitle}`,
+      ...this.optionalLine("Milestone goal", milestoneGoal),
+      ...this.optionalLine("Milestone description", milestoneDescription),
+      ...this.optionalLine("Depends on milestone id", dependsOnMilestoneId),
+      ...(typeof milestoneOrder === "number"
+        ? [`Milestone order: ${String(milestoneOrder)}`]
+        : []),
+      ...this.optionalLine("Milestone status", milestoneStatus),
+      ...this.optionalLine("Phase id", phaseId),
+      `Phase name: ${phaseName}`,
+      ...this.optionalLine("Phase goal", phaseGoal),
+      ...(typeof completedTaskCount === "number"
+        ? [`Completed milestone task count: ${String(completedTaskCount)}`]
+        : []),
+      ...(projectBrief ? ["", "Original project brief:", projectBrief] : []),
+    ];
+
+    const reviewInstructions = [
+      "Review only the stated milestone scope and acceptance criteria.",
+      "Decide whether the milestone passes as-is or needs a patch milestone.",
+      `Allowed decisions: ${reviewDecisionOptions.join(" | ")}`,
+      ...(patchRule ? [patchRule] : []),
+      "Do not expand the scope.",
+      "If a patch is needed, define only the smallest valid follow-up milestone required to satisfy the current milestone acceptance criteria.",
+      "Base the decision on the milestone evidence summary below and the milestone acceptance criteria.",
+    ];
+
+    const requirements = this.renderRequirements({
+      agentId: input.agentId,
+      taskPrompt: "",
+      ...(constraints ? { constraints } : {}),
+      ...(input.payload.acceptanceCriteria
+        ? { acceptanceCriteria: input.payload.acceptanceCriteria }
+        : {}),
+    });
+
+    if (this.isRetry(retry)) {
+      return this.joinSections([
+        this.renderRawSection(promptConfig.sections.task, [
+          "Continue the same milestone review in this session.",
+          `Project name: ${projectName}`,
+          `Milestone title: ${milestoneTitle}`,
+          "Use the existing session context for detailed evidence and prior checks.",
+          "Focus on producing a clean pass-or-patch decision grounded in the milestone acceptance criteria.",
+        ]),
+        this.renderList(promptConfig.sections.intent, reviewInstructions),
+        this.renderList("Milestone Scope", milestoneScope),
+        this.renderList(
+          "Milestone Acceptance Criteria",
+          milestoneAcceptanceCriteria,
+        ),
+        this.renderMilestoneExecutionEvidence(reviewEvidence),
+        this.buildRetryBlock(retry),
+        requirements,
+        this.renderMilestoneReviewOutputGuidance(),
+      ]);
+    }
+
+    return this.joinSections([
+      this.renderGlobalLayers("session", "execution"),
+      this.renderList(
+        promptConfig.sections.role,
+        this.getAgentRules("product_owner").role,
+      ),
+      this.renderList(promptConfig.sections.intent, reviewInstructions),
+      this.renderRawSection(promptConfig.sections.task, details),
+      this.renderList("Milestone Scope", milestoneScope),
+      this.renderList(
+        "Milestone Acceptance Criteria",
+        milestoneAcceptanceCriteria,
+      ),
+      this.renderMilestoneExecutionEvidence(reviewEvidence),
+      this.buildRetryBlock(retry),
+      requirements,
+      this.renderMilestoneReviewOutputGuidance(),
+    ]);
+  }
+
   private normalizePayloadInputs(
     inputs: Record<string, unknown>,
   ): Record<string, unknown> {
@@ -618,6 +812,22 @@ export class PromptService {
         this.readString(inputs.phaseName) ||
         this.readString(inputs.phaseGoal) ||
         phase),
+    );
+  }
+
+  private shouldUseMilestoneReviewPrompt(
+    inputs: Record<string, unknown>,
+  ): boolean {
+    const milestone = this.readRecord(inputs.milestone);
+    const reviewContract = this.readRecord(inputs.reviewContract);
+    const milestoneExecution = this.readRecord(inputs.milestoneExecution);
+
+    return (
+      Boolean(
+        this.readString(inputs.milestoneId) ||
+        this.readString(inputs.milestoneTitle) ||
+        milestone,
+      ) && Boolean(reviewContract || milestoneExecution)
     );
   }
 
@@ -1029,6 +1239,121 @@ ${lines.join("\n")}`;
     return afterMarker.slice(0, nextSectionMatch.index).trim();
   }
 
+  private readMilestoneReviewProjectBrief(
+    inputs: Record<string, unknown>,
+  ): string | undefined {
+    const rawProjectRequest =
+      this.readRawProjectRequest(inputs) ??
+      this.readString(inputs.request) ??
+      this.readString(inputs.userPrompt);
+
+    if (!rawProjectRequest) {
+      return undefined;
+    }
+
+    const normalized = rawProjectRequest.replace(/\s+/g, " ").trim();
+    const looksLikeRenderedPrompt =
+      normalized.includes("Global Guidance:") ||
+      normalized.includes("Role Guidance:") ||
+      normalized.includes("Intent Guidance:") ||
+      normalized.includes("Task Context:") ||
+      normalized.includes("Output Guidance:");
+
+    if (looksLikeRenderedPrompt) {
+      return undefined;
+    }
+
+    return normalized.length > 280
+      ? `${normalized.slice(0, 277).replace(/\s+$/u, "")}...`
+      : normalized;
+  }
+
+  private renderMilestoneExecutionEvidence(
+    tasks: Record<string, unknown>[],
+  ): string | undefined {
+    if (tasks.length === 0) {
+      return this.renderRawSection("Milestone Evidence Summary", [
+        "No milestone execution evidence was provided. Base the review on the stated scope and acceptance criteria, and explain any uncertainty clearly.",
+      ]);
+    }
+
+    const lines: string[] = [];
+
+    for (const [index, task] of tasks.entries()) {
+      if (index >= 6) {
+        break;
+      }
+
+      const taskId =
+        this.readString(task.taskId) ??
+        this.readString(task._id) ??
+        `task-${index + 1}`;
+      const intent = this.readString(task.intent);
+      const targetAgentId = this.readString(task.targetAgentId);
+      const status = this.readString(task.status) ?? "unknown";
+      const summary =
+        this.readString(task.summary) ??
+        this.readString(task.resultSummary) ??
+        this.readString(task.findingSummary);
+
+      lines.push(
+        `${index + 1}. Task ${taskId}: status=${status}${intent ? `, intent=${intent}` : ""}${targetAgentId ? `, target=${targetAgentId}` : ""}`,
+      );
+
+      if (summary) {
+        lines.push(`   summary: ${summary}`);
+      }
+
+      const acceptanceCriteria = this.readStringArray(
+        task.acceptanceCriteria,
+      ).slice(0, 2);
+      if (acceptanceCriteria.length > 0) {
+        lines.push(`   acceptance checks: ${acceptanceCriteria.join("; ")}`);
+      }
+
+      const outputs = this.readRecord(task.outputs);
+      if (outputs) {
+        const outputKeys = Object.keys(outputs);
+        if (outputKeys.length > 0) {
+          lines.push(`   output keys: ${outputKeys.slice(0, 6).join(", ")}`);
+        }
+      }
+
+      const artifacts = this.readStringArray(task.artifacts);
+      if (artifacts.length > 0) {
+        lines.push(`   artifacts: ${artifacts.slice(0, 4).join(", ")}`);
+      }
+
+      const errors = this.readStringArray(task.errors);
+      const lastError = this.readString(task.lastError);
+      const issues = [...errors.slice(0, 2), ...(lastError ? [lastError] : [])];
+      if (issues.length > 0) {
+        lines.push(`   issues: ${issues.join("; ")}`);
+      }
+    }
+
+    if (tasks.length > 6) {
+      lines.push(
+        `Additional evidence entries omitted: ${String(tasks.length - 6)}`,
+      );
+    }
+
+    return this.renderRawSection("Milestone Evidence Summary", lines);
+  }
+
+  private renderMilestoneReviewOutputGuidance(): string | undefined {
+    return this.renderRawSection(promptConfig.sections.output, [
+      "Use the normal task response envelope required by the orchestrator.",
+      'Set outputs.decision to either "pass" or "patch".',
+      "Ground the decision in the milestone scope, acceptance criteria, and the evidence summary above.",
+      "If the milestone passes, briefly explain which acceptance criteria were met.",
+      "If a patch is needed, include outputs.patchMilestone with only the smallest valid follow-up milestone needed to satisfy the current milestone.",
+      "outputs.patchMilestone must include: title (string), goal (string), description (string), scope (string[]), acceptanceCriteria (string[]).",
+      'Recommended outputs shape: {"decision":"pass|patch","summary":"","metAcceptanceCriteria":[],"missingOrBrokenItems":[],"patchMilestone":{"title":"","goal":"","description":"","scope":[],"acceptanceCriteria":[]}}',
+      "Do not create execution tasks. Only approve the milestone or define the patch milestone.",
+    ]);
+  }
+
   private readString(value: unknown): string | undefined {
     return typeof value === "string" && value.trim().length > 0
       ? value.trim()
@@ -1047,6 +1372,17 @@ ${lines.join("\n")}`;
     }
 
     return value.filter((item): item is string => typeof item === "string");
+  }
+
+  private readRecordArray(value: unknown): Record<string, unknown>[] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+
+    return value.filter(
+      (item): item is Record<string, unknown> =>
+        Boolean(item) && typeof item === "object" && !Array.isArray(item),
+    );
   }
 
   private readRecord(value: unknown): Record<string, unknown> | undefined {

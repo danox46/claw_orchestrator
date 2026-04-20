@@ -39,8 +39,7 @@ export const promptConfig = {
       role: [
         "You break work into narrow, executable tasks.",
         "We want granular task records for better tracking and execution.",
-        "Avoid broad or vague tasks that combine multiple steps.",
-        "Do not create broad or vague tasks.",
+        "Avoid broad, vague, or multi-purpose tasks.",
         "Prefer dependency-aware sequencing.",
       ],
       output: [
@@ -72,12 +71,15 @@ export const promptConfig = {
     },
     product_owner: {
       role: [
-        "You review milestone readiness against scope and acceptance criteria.",
-        "You may approve, request revision, or escalate for human input.",
-        "We want small phases, so when planning a phase, prefer more smaller phases.",
+        "You make project-level decisions grounded in the approved scope and acceptance criteria.",
+        "When planning phases, prefer smaller, practical phases that are easy to execute and review.",
+        "When reviewing a milestone, approve it only if the stated milestone scope and acceptance criteria are met.",
+        "If the milestone is not ready, define the smallest valid patch milestone needed to satisfy the current milestone only.",
+        "Do not introduce unrelated enhancements or future-scope work during milestone review.",
       ],
       output: [
-        "Be explicit about whether the work is approved, needs revision, or needs user input.",
+        "Be explicit about the decision and rationale.",
+        "For milestone review, return either a clear pass decision or a tightly-scoped patch milestone.",
       ],
     },
     default: {
@@ -108,7 +110,11 @@ export const promptConfig = {
       "Return findings, not fixes.",
     ],
     review_milestone: [
-      "Determine whether the milestone is ready for approval, revision, or user input.",
+      "Review only the current milestone against its stated scope, acceptance criteria, and execution evidence.",
+      "Choose exactly one outcome: pass the milestone, or require a patch milestone.",
+      "Do not request a generic revision and do not expand the scope beyond the current milestone.",
+      "If a patch is needed, define the smallest milestone that would fix only the missing, broken, or insufficient parts of the current milestone.",
+      "Do not include work that belongs to later milestones or optional improvements.",
     ],
     default: [
       "Follow the assigned task exactly and keep the result grounded in the provided context.",
@@ -135,7 +141,11 @@ export const promptConfig = {
       "The previous attempt was incomplete.",
       "Finish the required deliverable instead of restarting broadly.",
     ],
-    default: ["Adjust your approach based on the previous failure details."],
+    default: [
+      "Adjust your approach based on the previous failure details.",
+      "Take your time to analyze the error and then resolve it",
+      "Take your time to make sure you're responding with a valid JSON",
+    ],
   },
 
   outputReminders: {
@@ -154,7 +164,11 @@ export const promptConfig = {
     planner: [
       "Return tasks that are narrow, actionable, and dependency-aware.",
       "Return only valid JSON.",
-      `Use this exact response envelope: {"taskId":"69e2d6c44433488800342729","status":"succeeded|failed","summary":"","outputs":{"tasks":[{"localId":"task-1","intent":"implement_feature","target":{"agentId":"implementer"},"inputs":{"prompt":"Implement the requested phase work.","testingCriteria":["expected behavior 1","expected behavior 2"]},"constraints":{"toolProfile":"implementer-safe","sandbox":"non-main"},"requiredArtifacts":[],"acceptanceCriteria":["criterion-1"],"dependsOn":[]}]},"artifacts":[],"errors":[]}. If status is "failed", return {"taskId":"69e2d6c44433488800342729","status":"failed","summary":"brief reason","outputs":{},"artifacts":[],"errors":["specific blocker"]}.`,
+      'Use this exact top-level response envelope shape for success: {"taskId":"69e2d6c44433488800342729","status":"succeeded","summary":"","outputs":{"tasks":[...]},"artifacts":[],"errors":[]}',
+      'Use this exact top-level response envelope shape for failure: {"taskId":"69e2d6c44433488800342729","status":"failed","summary":"brief reason","outputs":{},"artifacts":[],"errors":["specific blocker"]}',
+      "Inside each task, inputs may contain only prompt and testingCriteria.",
+      "Do not place constraints, requiredArtifacts, acceptanceCriteria, or dependsOn inside inputs.",
+      "Each task must include these top-level keys: localId, intent, target, inputs, constraints, requiredArtifacts, acceptanceCriteria, dependsOn.",
       `Task format:
 {
 "localId": "task-1",
@@ -181,7 +195,7 @@ export const promptConfig = {
 }`,
     ],
     project_owner: [
-      "Return a clear approval verdict with rationale.",
+      "Return a clear planning or review decision with rationale.",
       "Return only valid JSON.",
       `Use this exact response envelope: {"taskId":"69e2d6c44433488800342729","status":"succeeded|failed","summary":"","outputs":{"phases":[{"phaseId":"phase-1","name":"Project Foundation and Setup","goal":"","description":"","dependsOn":[],"inputs":{},"deliverables":[""],"exitCriteria":[""]}]},"artifacts":[],"errors":[]}. If status is "failed", return {"taskId":"69e2d6c44433488800342729","status":"failed","summary":"brief reason","outputs":{},"artifacts":[],"errors":["specific blocker"]}.`,
       `Phase format:

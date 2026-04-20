@@ -62,6 +62,36 @@ type PlannedTaskDefinition = {
   dependsOn: string[];
 };
 
+type PatchMilestonePlan = {
+  title: string;
+  goal?: string;
+  description?: string;
+  scope: string[];
+  acceptanceCriteria: string[];
+};
+
+type MilestoneReviewOutcome = {
+  decision: "pass" | "patch";
+  summary?: string;
+  metAcceptanceCriteria: string[];
+  missingOrBrokenItems: string[];
+  patchMilestone?: PatchMilestonePlan;
+};
+
+type PreparedConcreteTask = {
+  index: number;
+  plannedTask: PlannedTaskDefinition;
+  idempotencyKey: string;
+  sequence: number;
+  targetAgentId: string;
+  createIntent: CreateTaskInput["intent"];
+  inputs: Record<string, unknown>;
+  constraints: CreateTaskInput["constraints"];
+  referenceKeys: string[];
+  dependencyRefs: string[];
+  existingTask?: TaskRecord;
+};
+
 export type AgentDispatchServiceDependencies = {
   openClawClient: OpenClawClient;
   tasksService: TasksServicePort;
@@ -161,6 +191,8 @@ export class AgentDispatchService {
         await this.tasksService.markRunning(task._id);
       }
 
+      const dispatchInputs = await this.buildDispatchInputs(task);
+
       const sendResult = await this.openClawClient.sendTask({
         agentId: task.target.agentId,
         payload: {
@@ -169,7 +201,7 @@ export class AgentDispatchService {
           milestoneId: task.milestoneId,
           taskId: task._id,
           intent: String(task.intent),
-          inputs: task.inputs,
+          inputs: dispatchInputs,
           constraints: {
             toolProfile: task.constraints.toolProfile,
             sandbox: task.constraints.sandbox,
@@ -485,6 +517,9 @@ export class AgentDispatchService {
       case "plan_next_tasks":
         await this.enqueueConcreteMilestoneTasks(input);
         return;
+      case "review_milestone":
+        await this.handleMilestoneReviewOutcome(input);
+        return;
       default:
         return;
     }
@@ -638,7 +673,9 @@ export class AgentDispatchService {
     dispatchLogger: typeof logger;
   }): Promise<void> {
     const createTask = this.getCreateTaskOrThrow();
-    const plannedTasks = this.extractPlannedTasks(input.finalResult.outputs);
+    const plannedTasks = this.extractPlannedTasks(
+      input.finalResult.outputs,
+    ).filter((plannedTask) => plannedTask.intent !== "review_milestone");
 
     if (plannedTasks.length === 0) {
       throw createServiceError({
@@ -653,6 +690,10 @@ export class AgentDispatchService {
         },
       });
     }
+
+    const milestone = await this.milestonesService.requireMilestoneById(
+      input.task.milestoneId,
+    );
 
     const existingTasks = await this.tasksService.listTasks({
       jobId: input.task.jobId,
@@ -672,21 +713,25 @@ export class AgentDispatchService {
       this.readOptionalString(parentInputs, ["phaseName"]) ?? "Current phase";
     const phaseGoal = this.readOptionalString(parentInputs, ["phaseGoal"]);
 
+    const preparedTasks = this.prepareConcreteMilestoneTasks({
+      plannerTask: input.task,
+      plannedTasks,
+      existingByIdempotencyKey,
+      phaseId,
+      phaseName,
+      ...(phaseGoal ? { phaseGoal } : {}),
+    });
+
     const resolvedTasks: Array<{
-      plannedTask: PlannedTaskDefinition;
+      preparedTask: PreparedConcreteTask;
       taskRecord: TaskRecord;
-      referenceKeys: string[];
     }> = [];
 
     const createdTaskIds: string[] = [];
     let skippedExistingTaskCount = 0;
 
-    for (const [index, plannedTask] of plannedTasks.entries()) {
-      const idempotencyKey =
-        plannedTask.idempotencyKey ??
-        `${input.task.jobId}:${input.task.milestoneId}:planned-task:${index + 1}:${plannedTask.intent}`;
-
-      let taskRecord = existingByIdempotencyKey.get(idempotencyKey);
+    for (const preparedTask of preparedTasks) {
+      let taskRecord = preparedTask.existingTask;
 
       if (!taskRecord) {
         taskRecord = await createTask({
@@ -701,51 +746,33 @@ export class AgentDispatchService {
             role: "orchestrator",
           },
           target: {
-            agentId: this.resolveTargetAgentId(
-              plannedTask.intent,
-              plannedTask.targetAgentId,
-            ),
+            agentId: preparedTask.targetAgentId,
           },
-          intent: this.asCreateTaskIntent(plannedTask.intent),
-          inputs: this.buildConcreteTaskInputs({
-            parentTask: input.task,
-            plannedTask,
-            phaseId,
-            phaseName,
-            ...(phaseGoal ? { phaseGoal } : {}),
-          }),
-          constraints: this.buildTaskConstraints(
-            input.task.constraints,
-            plannedTask.constraints,
-          ),
-          requiredArtifacts: plannedTask.requiredArtifacts,
-          acceptanceCriteria: plannedTask.acceptanceCriteria,
-          idempotencyKey,
-          sequence: this.getConcreteTaskSequence(input.task.sequence, index),
+          intent: preparedTask.createIntent,
+          inputs: preparedTask.inputs,
+          constraints: preparedTask.constraints,
+          requiredArtifacts: preparedTask.plannedTask.requiredArtifacts,
+          acceptanceCriteria: preparedTask.plannedTask.acceptanceCriteria,
+          idempotencyKey: preparedTask.idempotencyKey,
+          sequence: preparedTask.sequence,
         });
 
-        existingByIdempotencyKey.set(idempotencyKey, taskRecord);
+        existingByIdempotencyKey.set(preparedTask.idempotencyKey, taskRecord);
         createdTaskIds.push(taskRecord._id);
       } else {
         skippedExistingTaskCount += 1;
       }
 
-      const referenceKeys = this.buildPlannedTaskReferenceKeys(
-        plannedTask,
-        idempotencyKey,
-      );
-
       resolvedTasks.push({
-        plannedTask,
+        preparedTask,
         taskRecord,
-        referenceKeys,
       });
     }
 
     const referenceToTaskId = new Map<string, string>();
 
     for (const resolvedTask of resolvedTasks) {
-      for (const referenceKey of resolvedTask.referenceKeys) {
+      for (const referenceKey of resolvedTask.preparedTask.referenceKeys) {
         if (!referenceToTaskId.has(referenceKey)) {
           referenceToTaskId.set(referenceKey, resolvedTask.taskRecord._id);
         }
@@ -753,26 +780,25 @@ export class AgentDispatchService {
     }
 
     for (const resolvedTask of resolvedTasks) {
-      if (resolvedTask.plannedTask.dependsOn.length === 0) {
+      if (resolvedTask.preparedTask.dependencyRefs.length === 0) {
         continue;
       }
 
       const dependencyTaskIds: string[] = [];
 
-      for (const dependencyRef of resolvedTask.plannedTask.dependsOn) {
+      for (const dependencyRef of resolvedTask.preparedTask.dependencyRefs) {
         const dependencyTaskId = referenceToTaskId.get(dependencyRef);
 
         if (!dependencyTaskId) {
-          throw createServiceError({
-            message: `Planned task dependency "${dependencyRef}" could not be resolved for milestone ${input.task.milestoneId}.`,
-            code: "PLANNED_TASK_DEPENDENCY_UNRESOLVED",
-            statusCode: 500,
+          throw this.createPlannedTaskValidationError({
+            code: "PLANNED_TASK_DEPENDENCY_RUNTIME_UNRESOLVED",
+            message: `Validated dependency "${dependencyRef}" could not be resolved to a created task for ${this.describePlannedTask(resolvedTask.preparedTask.plannedTask, resolvedTask.preparedTask.index)}.`,
+            plannerTask: input.task,
+            plannedTask: resolvedTask.preparedTask.plannedTask,
+            plannedTaskIndex: resolvedTask.preparedTask.index,
             details: {
-              milestoneId: input.task.milestoneId,
-              taskId: input.task._id,
               dependencyRef,
-              plannedTaskIntent: resolvedTask.plannedTask.intent,
-              plannedTaskLocalId: resolvedTask.plannedTask.localId,
+              idempotencyKey: resolvedTask.preparedTask.idempotencyKey,
             },
           });
         }
@@ -804,14 +830,29 @@ export class AgentDispatchService {
       });
     }
 
+    const reviewTaskResult = await this.ensureMilestoneReviewTask({
+      createTask,
+      plannerTask: input.task,
+      milestone,
+      phaseId,
+      phaseName,
+      ...(phaseGoal ? { phaseGoal } : {}),
+      concreteTasks: resolvedTasks.map(
+        (resolvedTask) => resolvedTask.taskRecord,
+      ),
+    });
+
     input.dispatchLogger.info(
       {
         phaseId,
         createdTaskCount: createdTaskIds.length,
         skippedExistingTaskCount,
         createdTaskIds,
+        reviewTaskId: reviewTaskResult.reviewTaskId,
+        reviewTaskCreated: reviewTaskResult.created,
+        reviewTaskUpdated: reviewTaskResult.updated,
       },
-      "Created concrete milestone tasks and resolved dependencies.",
+      "Created concrete milestone tasks, verified dependencies, and synced the milestone review task.",
     );
   }
 
@@ -865,6 +906,858 @@ export class AgentDispatchService {
           }
         : {}),
     };
+  }
+
+  private async buildDispatchInputs(
+    task: TaskRecord,
+  ): Promise<Record<string, unknown>> {
+    const baseInputs = this.asRecord(task.inputs);
+
+    if (String(task.intent) !== "review_milestone") {
+      return baseInputs;
+    }
+
+    const milestone = await this.milestonesService.requireMilestoneById(
+      task.milestoneId,
+    );
+
+    const milestoneTasks = await this.tasksService.listTasks({
+      jobId: task.jobId,
+      milestoneId: task.milestoneId,
+      limit: 500,
+    });
+
+    const reviewEvidence = milestoneTasks
+      .filter(
+        (candidateTask) =>
+          candidateTask._id !== task._id &&
+          this.shouldIncludeTaskInMilestoneReviewEvidence(
+            String(candidateTask.intent),
+          ),
+      )
+      .sort((left, right) => {
+        if (left.sequence !== right.sequence) {
+          return left.sequence - right.sequence;
+        }
+
+        return left.createdAt.getTime() - right.createdAt.getTime();
+      })
+      .map((candidateTask) => ({
+        taskId: candidateTask._id,
+        intent: String(candidateTask.intent),
+        targetAgentId: candidateTask.target.agentId,
+        status: candidateTask.status,
+        acceptanceCriteria: [...candidateTask.acceptanceCriteria],
+        ...(candidateTask.outputs ? { outputs: candidateTask.outputs } : {}),
+        ...(candidateTask.artifacts.length > 0
+          ? { artifacts: [...candidateTask.artifacts] }
+          : {}),
+        ...(candidateTask.errors.length > 0
+          ? { errors: [...candidateTask.errors] }
+          : {}),
+        ...(typeof candidateTask.lastError === "string" &&
+        candidateTask.lastError.trim().length > 0
+          ? { lastError: candidateTask.lastError }
+          : {}),
+      }));
+
+    return {
+      ...baseInputs,
+      milestone: {
+        id: milestone._id,
+        title: milestone.title,
+        ...(milestone.description
+          ? { description: milestone.description }
+          : {}),
+        order: milestone.order,
+        status: milestone.status,
+        ...(milestone.goal ? { goal: milestone.goal } : {}),
+        scope: [...milestone.scope],
+        acceptanceCriteria: [...milestone.acceptanceCriteria],
+        ...(milestone.dependsOnMilestoneId
+          ? { dependsOnMilestoneId: milestone.dependsOnMilestoneId }
+          : {}),
+      },
+      milestoneExecution: {
+        completedTaskCount: reviewEvidence.length,
+        tasks: reviewEvidence,
+      },
+    };
+  }
+
+  private shouldIncludeTaskInMilestoneReviewEvidence(intent: string): boolean {
+    return (
+      intent !== "plan_project_phases" &&
+      intent !== "plan_phase_tasks" &&
+      intent !== "plan_next_tasks" &&
+      intent !== "review_milestone"
+    );
+  }
+
+  private async ensureMilestoneReviewTask(input: {
+    createTask: NonNullable<TasksServicePort["createTask"]>;
+    plannerTask: TaskRecord;
+    milestone: MilestoneRecord;
+    phaseId: string;
+    phaseName: string;
+    phaseGoal?: string;
+    concreteTasks: TaskRecord[];
+  }): Promise<{
+    reviewTaskId: string;
+    created: boolean;
+    updated: boolean;
+  }> {
+    const reviewIdempotencyKey = `${input.plannerTask.jobId}:milestone:${input.plannerTask.milestoneId}:review_milestone`;
+    const dependencyTaskIds = Array.from(
+      new Set(input.concreteTasks.map((task) => task._id)),
+    );
+    const reviewInputs = this.buildMilestoneReviewTaskInputs({
+      plannerTask: input.plannerTask,
+      milestone: input.milestone,
+      phaseId: input.phaseId,
+      phaseName: input.phaseName,
+      ...(input.phaseGoal ? { phaseGoal: input.phaseGoal } : {}),
+      concreteTasks: input.concreteTasks,
+    });
+    const reviewSequence = this.getMilestoneReviewTaskSequence(
+      input.plannerTask.sequence,
+      input.concreteTasks,
+    );
+    const existingReviewTask =
+      await this.tasksService.getTaskByIdempotencyKey(reviewIdempotencyKey);
+
+    if (!existingReviewTask) {
+      const reviewTask = await input.createTask({
+        jobId: input.plannerTask.jobId,
+        projectId: input.plannerTask.projectId,
+        milestoneId: input.plannerTask.milestoneId,
+        parentTaskId: input.plannerTask._id,
+        dependencies: dependencyTaskIds,
+        issuer: {
+          kind: "system",
+          id: "app-factory-orchestrator",
+          role: "orchestrator",
+        },
+        target: {
+          agentId: this.projectOwnerAgentId,
+        },
+        intent: this.asCreateTaskIntent("review_milestone"),
+        inputs: reviewInputs,
+        constraints: this.buildTaskConstraints(input.plannerTask.constraints),
+        requiredArtifacts: [],
+        acceptanceCriteria: [...input.milestone.acceptanceCriteria],
+        idempotencyKey: reviewIdempotencyKey,
+        sequence: reviewSequence,
+      });
+
+      return {
+        reviewTaskId: reviewTask._id,
+        created: true,
+        updated: false,
+      };
+    }
+
+    const canSyncQueuedReviewTask =
+      existingReviewTask.status === "queued" ||
+      existingReviewTask.status === "qa";
+
+    const shouldRequeueFailedReviewTask =
+      existingReviewTask.status === "failed" ||
+      existingReviewTask.status === "canceled";
+
+    if (canSyncQueuedReviewTask || shouldRequeueFailedReviewTask) {
+      await this.tasksService.updateTask(existingReviewTask._id, {
+        dependencies: dependencyTaskIds,
+        target: {
+          agentId: this.projectOwnerAgentId,
+        },
+        sequence: reviewSequence,
+        ...(shouldRequeueFailedReviewTask ? { status: "queued" } : {}),
+      });
+    }
+
+    return {
+      reviewTaskId: existingReviewTask._id,
+      created: false,
+      updated: canSyncQueuedReviewTask || shouldRequeueFailedReviewTask,
+    };
+  }
+
+  private buildMilestoneReviewTaskInputs(input: {
+    plannerTask: TaskRecord;
+    milestone: MilestoneRecord;
+    phaseId: string;
+    phaseName: string;
+    phaseGoal?: string;
+    concreteTasks: TaskRecord[];
+  }): Record<string, unknown> {
+    const plannerInputs = this.asRecord(input.plannerTask.inputs);
+
+    return {
+      ...(typeof plannerInputs.projectName === "string"
+        ? { projectName: plannerInputs.projectName }
+        : {}),
+      ...(typeof plannerInputs.projectRequest === "string"
+        ? { projectRequest: plannerInputs.projectRequest }
+        : typeof plannerInputs.prompt === "string"
+          ? { projectRequest: plannerInputs.prompt }
+          : {}),
+      ...(typeof plannerInputs.request === "string"
+        ? { request: plannerInputs.request }
+        : {}),
+      ...(typeof plannerInputs.appType === "string"
+        ? { appType: plannerInputs.appType }
+        : {}),
+      ...(typeof plannerInputs.stack === "string"
+        ? { stack: plannerInputs.stack }
+        : {}),
+      ...(typeof plannerInputs.deployment === "string"
+        ? { deployment: plannerInputs.deployment }
+        : {}),
+      milestoneId: input.milestone._id,
+      phaseId: input.phaseId,
+      phaseName: input.phaseName,
+      ...(input.phaseGoal ? { phaseGoal: input.phaseGoal } : {}),
+      milestone: {
+        id: input.milestone._id,
+        title: input.milestone.title,
+        ...(input.milestone.description
+          ? { description: input.milestone.description }
+          : {}),
+        order: input.milestone.order,
+        ...(input.milestone.goal ? { goal: input.milestone.goal } : {}),
+        scope: [...input.milestone.scope],
+        acceptanceCriteria: [...input.milestone.acceptanceCriteria],
+        ...(input.milestone.dependsOnMilestoneId
+          ? { dependsOnMilestoneId: input.milestone.dependsOnMilestoneId }
+          : {}),
+      },
+      reviewContract: {
+        allowedDecisions: ["pass", "patch"],
+        patchRule:
+          "If the milestone is incomplete or broken, define the smallest possible patch milestone needed to satisfy the stated acceptance criteria without adding new scope.",
+      },
+      milestoneTaskPlan: input.concreteTasks.map((task) => ({
+        taskId: task._id,
+        intent: String(task.intent),
+        targetAgentId: task.target.agentId,
+        acceptanceCriteria: [...task.acceptanceCriteria],
+      })),
+    };
+  }
+
+  private getMilestoneReviewTaskSequence(
+    plannerSequence: number,
+    concreteTasks: TaskRecord[],
+  ): number {
+    let maxSequence = plannerSequence;
+
+    for (const concreteTask of concreteTasks) {
+      if (concreteTask.sequence > maxSequence) {
+        maxSequence = concreteTask.sequence;
+      }
+    }
+
+    return maxSequence + 10;
+  }
+
+  private async handleMilestoneReviewOutcome(input: {
+    job: JobRecord;
+    task: TaskRecord;
+    finalResult: OpenClawTaskStatusResponse;
+    dispatchLogger: typeof logger;
+  }): Promise<void> {
+    const milestone = await this.milestonesService.requireMilestoneById(
+      input.task.milestoneId,
+    );
+    const outcome = this.extractMilestoneReviewOutcome(
+      input.finalResult.outputs,
+    );
+
+    if (!outcome) {
+      throw createServiceError({
+        message:
+          "review_milestone succeeded but returned no usable decision in outputs.decision.",
+        code: "MILESTONE_REVIEW_OUTPUT_MISSING",
+        statusCode: 500,
+        details: {
+          jobId: input.task.jobId,
+          taskId: input.task._id,
+          outputs: input.finalResult.outputs,
+        },
+      });
+    }
+
+    if (outcome.decision === "pass") {
+      input.dispatchLogger.info(
+        {
+          decision: outcome.decision,
+          milestoneId: milestone._id,
+          milestoneTitle: milestone.title,
+          metAcceptanceCriteria: outcome.metAcceptanceCriteria,
+        },
+        "Milestone review passed with no patch milestone required.",
+      );
+      return;
+    }
+
+    const patchResult = await this.createPatchMilestoneFromReview({
+      job: input.job,
+      reviewTask: input.task,
+      sourceMilestone: milestone,
+      outcome,
+    });
+
+    input.dispatchLogger.info(
+      {
+        sourceMilestoneId: milestone._id,
+        sourceMilestoneTitle: milestone.title,
+        patchMilestoneId: patchResult.patchMilestone._id,
+        patchMilestoneTitle: patchResult.patchMilestone.title,
+        patchPlannerTaskId: patchResult.patchPlannerTaskId,
+        createdPatchMilestone: patchResult.createdPatchMilestone,
+        reusedPatchMilestone: patchResult.reusedPatchMilestone,
+        rewiredMilestoneIds: patchResult.rewiredMilestoneIds,
+      },
+      "Milestone review requested a patch milestone and the follow-up work was enqueued.",
+    );
+  }
+
+  private extractMilestoneReviewOutcome(
+    outputs: unknown,
+  ): MilestoneReviewOutcome | null {
+    const record = this.asRecord(outputs);
+    const nestedOutputs = this.asRecord(record.outputs);
+    const source = Object.keys(record).length > 0 ? record : nestedOutputs;
+
+    const decisionValue =
+      this.readOptionalString(source, [
+        "decision",
+        "reviewDecision",
+        "outcome",
+      ]) ??
+      this.readOptionalString(nestedOutputs, [
+        "decision",
+        "reviewDecision",
+        "outcome",
+      ]);
+
+    const decision =
+      decisionValue === "pass" || decisionValue === "patch"
+        ? decisionValue
+        : decisionValue?.toLowerCase() === "pass"
+          ? "pass"
+          : decisionValue?.toLowerCase() === "patch"
+            ? "patch"
+            : undefined;
+
+    if (!decision) {
+      return null;
+    }
+
+    const metAcceptanceCriteria = this.normalizeStringArray(
+      source.metAcceptanceCriteria ??
+        source.criteriaMet ??
+        nestedOutputs.metAcceptanceCriteria ??
+        nestedOutputs.criteriaMet,
+    );
+    const missingOrBrokenItems = this.normalizeStringArray(
+      source.missingOrBrokenItems ??
+        source.issues ??
+        nestedOutputs.missingOrBrokenItems ??
+        nestedOutputs.issues,
+    );
+    const summary =
+      this.readOptionalString(source, ["summary"]) ??
+      this.readOptionalString(nestedOutputs, ["summary"]);
+    const patchMilestone = this.normalizePatchMilestonePlan(
+      source.patchMilestone ??
+        source.patch ??
+        nestedOutputs.patchMilestone ??
+        nestedOutputs.patch,
+      missingOrBrokenItems,
+    );
+
+    return {
+      decision,
+      ...(summary ? { summary } : {}),
+      metAcceptanceCriteria,
+      missingOrBrokenItems,
+      ...(patchMilestone ? { patchMilestone } : {}),
+    };
+  }
+
+  private normalizePatchMilestonePlan(
+    value: unknown,
+    fallbackItems: string[],
+  ): PatchMilestonePlan | null {
+    const record = this.asRecord(value);
+
+    if (Object.keys(record).length === 0 && fallbackItems.length === 0) {
+      return null;
+    }
+
+    const title = this.readOptionalString(record, ["title", "name"]);
+    const goal = this.readOptionalString(record, ["goal"]);
+    const rawDescription = this.readOptionalString(record, ["description"]);
+    const scope = this.normalizeStringArray(
+      record.scope ?? record.deliverables ?? fallbackItems,
+    );
+    const acceptanceCriteria = this.normalizeStringArray(
+      record.acceptanceCriteria ?? record.exitCriteria ?? fallbackItems,
+    );
+
+    if (!title && acceptanceCriteria.length === 0 && scope.length === 0) {
+      return null;
+    }
+
+    return {
+      title: title ?? "Patch milestone",
+      ...(goal ? { goal } : {}),
+      ...(rawDescription ? { description: rawDescription } : {}),
+      scope,
+      acceptanceCriteria,
+    };
+  }
+
+  private async createPatchMilestoneFromReview(input: {
+    job: JobRecord;
+    reviewTask: TaskRecord;
+    sourceMilestone: MilestoneRecord;
+    outcome: MilestoneReviewOutcome;
+  }): Promise<{
+    patchMilestone: MilestoneRecord;
+    patchPlannerTaskId?: string;
+    createdPatchMilestone: boolean;
+    reusedPatchMilestone: boolean;
+    rewiredMilestoneIds: string[];
+  }> {
+    const createTask = this.getCreateTaskOrThrow();
+    const milestones = await this.milestonesService.listMilestones({
+      projectId: input.job.projectId,
+      limit: 200,
+    });
+
+    let patchMilestone = milestones.find((milestone) =>
+      this.isPatchMilestoneForReview(milestone, input.reviewTask._id),
+    );
+    let createdPatchMilestone = false;
+    let reusedPatchMilestone = false;
+
+    if (!patchMilestone) {
+      await this.shiftMilestoneOrdersForPatchInsertion({
+        sourceMilestone: input.sourceMilestone,
+        milestones,
+      });
+
+      const patchPlan = this.buildPatchMilestonePlan({
+        sourceMilestone: input.sourceMilestone,
+        reviewTaskId: input.reviewTask._id,
+        outcome: input.outcome,
+      });
+
+      patchMilestone = await this.milestonesService.createMilestone({
+        projectId: input.job.projectId,
+        title: patchPlan.title,
+        ...(patchPlan.description
+          ? { description: patchPlan.description }
+          : {}),
+        order: input.sourceMilestone.order + 1,
+        status: "ready",
+        ...(patchPlan.goal ? { goal: patchPlan.goal } : {}),
+        scope: [...patchPlan.scope],
+        acceptanceCriteria: [...patchPlan.acceptanceCriteria],
+        dependsOnMilestoneId: input.sourceMilestone._id,
+      });
+      createdPatchMilestone = true;
+    } else {
+      reusedPatchMilestone = true;
+    }
+
+    const refreshedMilestones = await this.milestonesService.listMilestones({
+      projectId: input.job.projectId,
+      limit: 200,
+    });
+    const rewiredMilestoneIds = await this.rewireMilestonesToPatch({
+      sourceMilestone: input.sourceMilestone,
+      patchMilestone,
+      milestones: refreshedMilestones,
+    });
+
+    const patchPlannerIdempotencyKey = `${input.reviewTask.jobId}:milestone:${patchMilestone._id}:plan_phase_tasks`;
+    const existingPatchPlannerTask =
+      await this.tasksService.getTaskByIdempotencyKey(
+        patchPlannerIdempotencyKey,
+      );
+
+    let patchPlannerTaskId: string | undefined = existingPatchPlannerTask?._id;
+
+    if (!existingPatchPlannerTask) {
+      const patchPlannerTask = await createTask({
+        jobId: input.reviewTask.jobId,
+        projectId: input.reviewTask.projectId,
+        milestoneId: patchMilestone._id,
+        parentTaskId: input.reviewTask._id,
+        dependencies: [],
+        issuer: {
+          kind: "system",
+          id: "app-factory-orchestrator",
+          role: "orchestrator",
+        },
+        target: {
+          agentId: this.projectManagerAgentId,
+        },
+        intent: this.asCreateTaskIntent("plan_phase_tasks"),
+        inputs: {
+          ...(typeof input.reviewTask.inputs === "object" &&
+          input.reviewTask.inputs !== null
+            ? this.asRecord(input.reviewTask.inputs)
+            : {}),
+          milestoneId: patchMilestone._id,
+          phaseId: `patch-${patchMilestone.order}`,
+          phaseName: patchMilestone.title,
+          ...(patchMilestone.goal ? { phaseGoal: patchMilestone.goal } : {}),
+          phase: {
+            phaseId: `patch-${patchMilestone.order}`,
+            name: patchMilestone.title,
+            ...(patchMilestone.goal ? { goal: patchMilestone.goal } : {}),
+            ...(patchMilestone.description
+              ? { description: patchMilestone.description }
+              : {}),
+            deliverables: [...patchMilestone.scope],
+            exitCriteria: [...patchMilestone.acceptanceCriteria],
+            sourceMilestoneId: input.sourceMilestone._id,
+            reviewTaskId: input.reviewTask._id,
+            patchForMilestoneId: input.sourceMilestone._id,
+            patchReason: input.outcome.missingOrBrokenItems,
+          },
+        },
+        constraints: this.buildTaskConstraints(input.reviewTask.constraints),
+        requiredArtifacts: [],
+        acceptanceCriteria: [...patchMilestone.acceptanceCriteria],
+        idempotencyKey: patchPlannerIdempotencyKey,
+        sequence: 0,
+      });
+
+      patchPlannerTaskId = patchPlannerTask._id;
+    }
+
+    return {
+      patchMilestone,
+      ...(patchPlannerTaskId ? { patchPlannerTaskId } : {}),
+      createdPatchMilestone,
+      reusedPatchMilestone: reusedPatchMilestone || !createdPatchMilestone,
+      rewiredMilestoneIds,
+    };
+  }
+
+  private buildPatchMilestonePlan(input: {
+    sourceMilestone: MilestoneRecord;
+    reviewTaskId: string;
+    outcome: MilestoneReviewOutcome;
+  }): PatchMilestonePlan {
+    const reviewMarker = this.buildPatchReviewMarker(input.reviewTaskId);
+    const fallbackTitle = `${input.sourceMilestone.title} Patch`;
+    const requestedPatch = input.outcome.patchMilestone;
+    const title = requestedPatch?.title?.trim().length
+      ? requestedPatch.title.trim()
+      : fallbackTitle;
+    const goal = requestedPatch?.goal?.trim().length
+      ? requestedPatch.goal.trim()
+      : input.outcome.summary;
+    const descriptionLines = [reviewMarker];
+
+    if (
+      typeof requestedPatch?.description === "string" &&
+      requestedPatch.description.trim().length > 0
+    ) {
+      descriptionLines.push(requestedPatch.description.trim());
+    }
+
+    const scopeSource = requestedPatch?.scope.length
+      ? requestedPatch.scope
+      : input.outcome.missingOrBrokenItems;
+    const acceptanceCriteriaSource = requestedPatch?.acceptanceCriteria.length
+      ? requestedPatch.acceptanceCriteria
+      : input.outcome.missingOrBrokenItems;
+
+    return {
+      title,
+      ...(goal ? { goal } : {}),
+      description: descriptionLines.join("\n\n"),
+      scope: [...scopeSource],
+      acceptanceCriteria: [...acceptanceCriteriaSource],
+    };
+  }
+
+  private buildPatchReviewMarker(reviewTaskId: string): string {
+    return `Patch source review task: ${reviewTaskId}`;
+  }
+
+  private isPatchMilestoneForReview(
+    milestone: MilestoneRecord,
+    reviewTaskId: string,
+  ): boolean {
+    return (
+      typeof milestone.description === "string" &&
+      milestone.description.includes(this.buildPatchReviewMarker(reviewTaskId))
+    );
+  }
+
+  private async shiftMilestoneOrdersForPatchInsertion(input: {
+    sourceMilestone: MilestoneRecord;
+    milestones: MilestoneRecord[];
+  }): Promise<void> {
+    const milestonesToShift = input.milestones
+      .filter((milestone) => milestone.order > input.sourceMilestone.order)
+      .sort((left, right) => right.order - left.order);
+
+    for (const milestone of milestonesToShift) {
+      await this.milestonesService.updateMilestone(milestone._id, {
+        order: milestone.order + 1,
+      });
+    }
+  }
+
+  private async rewireMilestonesToPatch(input: {
+    sourceMilestone: MilestoneRecord;
+    patchMilestone: MilestoneRecord;
+    milestones: MilestoneRecord[];
+  }): Promise<string[]> {
+    const rewiredMilestoneIds: string[] = [];
+    const downstreamMilestones = input.milestones.filter(
+      (milestone) =>
+        milestone._id !== input.patchMilestone._id &&
+        milestone.dependsOnMilestoneId === input.sourceMilestone._id,
+    );
+
+    for (const downstreamMilestone of downstreamMilestones) {
+      await this.milestonesService.updateMilestone(downstreamMilestone._id, {
+        dependsOnMilestoneId: input.patchMilestone._id,
+      });
+      rewiredMilestoneIds.push(downstreamMilestone._id);
+    }
+
+    return rewiredMilestoneIds;
+  }
+
+  private prepareConcreteMilestoneTasks(input: {
+    plannerTask: TaskRecord;
+    plannedTasks: PlannedTaskDefinition[];
+    existingByIdempotencyKey: Map<string, TaskRecord>;
+    phaseId: string;
+    phaseName: string;
+    phaseGoal?: string;
+  }): PreparedConcreteTask[] {
+    const preparedTasks: PreparedConcreteTask[] = [];
+    const seenIdempotencyKeys = new Set<string>();
+    const referenceKeyOwnerByKey = new Map<string, PreparedConcreteTask>();
+
+    for (const [index, plannedTask] of input.plannedTasks.entries()) {
+      const idempotencyKey =
+        plannedTask.idempotencyKey ??
+        `${input.plannerTask.jobId}:${input.plannerTask.milestoneId}:planned-task:${index + 1}:${plannedTask.intent}`;
+      const referenceKeys = this.buildPlannedTaskReferenceKeys(
+        plannedTask,
+        idempotencyKey,
+      );
+      const targetAgentId = this.resolveTargetAgentId(
+        plannedTask.intent,
+        plannedTask.targetAgentId,
+      );
+      const preparedTask: PreparedConcreteTask = {
+        index,
+        plannedTask,
+        idempotencyKey,
+        sequence: this.getConcreteTaskSequence(
+          input.plannerTask.sequence,
+          index,
+        ),
+        targetAgentId,
+        createIntent: this.asCreateTaskIntent(plannedTask.intent),
+        inputs: this.buildConcreteTaskInputs({
+          parentTask: input.plannerTask,
+          plannedTask,
+          phaseId: input.phaseId,
+          phaseName: input.phaseName,
+          ...(input.phaseGoal ? { phaseGoal: input.phaseGoal } : {}),
+        }),
+        constraints: this.buildTaskConstraints(
+          input.plannerTask.constraints,
+          plannedTask.constraints,
+        ),
+        referenceKeys,
+        dependencyRefs: [...plannedTask.dependsOn],
+        ...(input.existingByIdempotencyKey.get(idempotencyKey)
+          ? {
+              existingTask: input.existingByIdempotencyKey.get(idempotencyKey)!,
+            }
+          : {}),
+      };
+
+      if (seenIdempotencyKeys.has(idempotencyKey)) {
+        throw this.createPlannedTaskValidationError({
+          code: "PLANNED_TASK_DUPLICATE_IDEMPOTENCY_KEY",
+          message: `Planned task list contains a duplicate idempotency key "${idempotencyKey}" for ${this.describePlannedTask(plannedTask, index)}. Each task must be uniquely identifiable.`,
+          plannerTask: input.plannerTask,
+          plannedTask,
+          plannedTaskIndex: index,
+          details: {
+            idempotencyKey,
+          },
+        });
+      }
+
+      seenIdempotencyKeys.add(idempotencyKey);
+
+      for (const referenceKey of referenceKeys) {
+        const existingOwner = referenceKeyOwnerByKey.get(referenceKey);
+        if (existingOwner) {
+          throw this.createPlannedTaskValidationError({
+            code: "PLANNED_TASK_DUPLICATE_REFERENCE",
+            message: `Planned task reference "${referenceKey}" is used more than once. ${this.describePlannedTask(plannedTask, index)} conflicts with ${this.describePlannedTask(existingOwner.plannedTask, existingOwner.index)}.`,
+            plannerTask: input.plannerTask,
+            plannedTask,
+            plannedTaskIndex: index,
+            details: {
+              referenceKey,
+              conflictingTaskIndex: existingOwner.index,
+              conflictingTaskLocalId: existingOwner.plannedTask.localId,
+              conflictingTaskIntent: existingOwner.plannedTask.intent,
+            },
+          });
+        }
+        referenceKeyOwnerByKey.set(referenceKey, preparedTask);
+      }
+
+      if (preparedTask.existingTask) {
+        this.verifyExistingConcreteTaskRecord({
+          plannerTask: input.plannerTask,
+          preparedTask,
+        });
+      }
+
+      preparedTasks.push(preparedTask);
+    }
+
+    for (const preparedTask of preparedTasks) {
+      for (const dependencyRef of preparedTask.dependencyRefs) {
+        const owner = referenceKeyOwnerByKey.get(dependencyRef);
+
+        if (!owner) {
+          throw this.createPlannedTaskValidationError({
+            code: "PLANNED_TASK_DEPENDENCY_UNRESOLVED",
+            message: `${this.describePlannedTask(preparedTask.plannedTask, preparedTask.index)} depends on "${dependencyRef}", but no task in the plan matches that reference. Fix the dependsOn values and return the full corrected task list.`,
+            plannerTask: input.plannerTask,
+            plannedTask: preparedTask.plannedTask,
+            plannedTaskIndex: preparedTask.index,
+            details: {
+              dependencyRef,
+              availableReferences: Array.from(referenceKeyOwnerByKey.keys()),
+            },
+          });
+        }
+
+        if (owner.idempotencyKey === preparedTask.idempotencyKey) {
+          throw this.createPlannedTaskValidationError({
+            code: "PLANNED_TASK_SELF_DEPENDENCY",
+            message: `${this.describePlannedTask(preparedTask.plannedTask, preparedTask.index)} cannot depend on itself (${dependencyRef}). Remove that self-dependency and return the full corrected task list.`,
+            plannerTask: input.plannerTask,
+            plannedTask: preparedTask.plannedTask,
+            plannedTaskIndex: preparedTask.index,
+            details: {
+              dependencyRef,
+            },
+          });
+        }
+      }
+    }
+
+    return preparedTasks;
+  }
+
+  private verifyExistingConcreteTaskRecord(input: {
+    plannerTask: TaskRecord;
+    preparedTask: PreparedConcreteTask;
+  }): void {
+    const existingTask = input.preparedTask.existingTask;
+
+    if (!existingTask) {
+      return;
+    }
+
+    if (
+      existingTask.milestoneId !== input.plannerTask.milestoneId ||
+      existingTask.jobId !== input.plannerTask.jobId ||
+      existingTask.parentTaskId !== input.plannerTask._id
+    ) {
+      throw this.createPlannedTaskValidationError({
+        code: "PLANNED_TASK_EXISTING_RECORD_MISMATCH",
+        message: `${this.describePlannedTask(input.preparedTask.plannedTask, input.preparedTask.index)} reuses idempotency key "${input.preparedTask.idempotencyKey}", but the existing task belongs to a different parent or milestone. Return a corrected task list with stable unique task identifiers.`,
+        plannerTask: input.plannerTask,
+        plannedTask: input.preparedTask.plannedTask,
+        plannedTaskIndex: input.preparedTask.index,
+        details: {
+          idempotencyKey: input.preparedTask.idempotencyKey,
+          existingTaskId: existingTask._id,
+          existingMilestoneId: existingTask.milestoneId,
+          existingParentTaskId: existingTask.parentTaskId,
+        },
+      });
+    }
+
+    if (
+      String(existingTask.intent) !== input.preparedTask.plannedTask.intent ||
+      existingTask.target.agentId !== input.preparedTask.targetAgentId
+    ) {
+      throw this.createPlannedTaskValidationError({
+        code: "PLANNED_TASK_EXISTING_RECORD_SHAPE_MISMATCH",
+        message: `${this.describePlannedTask(input.preparedTask.plannedTask, input.preparedTask.index)} reuses idempotency key "${input.preparedTask.idempotencyKey}", but the existing task has a different intent or target agent. Return a corrected task list with unique task ids or consistent task shapes.`,
+        plannerTask: input.plannerTask,
+        plannedTask: input.preparedTask.plannedTask,
+        plannedTaskIndex: input.preparedTask.index,
+        details: {
+          idempotencyKey: input.preparedTask.idempotencyKey,
+          existingTaskId: existingTask._id,
+          existingIntent: String(existingTask.intent),
+          existingTargetAgentId: existingTask.target.agentId,
+          expectedIntent: input.preparedTask.plannedTask.intent,
+          expectedTargetAgentId: input.preparedTask.targetAgentId,
+        },
+      });
+    }
+  }
+
+  private describePlannedTask(
+    plannedTask: PlannedTaskDefinition,
+    index: number,
+  ): string {
+    const label = plannedTask.localId ?? `task-${index + 1}`;
+    return `planned task ${label} (intent=${plannedTask.intent})`;
+  }
+
+  private createPlannedTaskValidationError(input: {
+    code: string;
+    message: string;
+    plannerTask: TaskRecord;
+    plannedTask: PlannedTaskDefinition;
+    plannedTaskIndex: number;
+    details?: Record<string, unknown>;
+  }): ServiceError {
+    return createServiceError({
+      message: input.message,
+      code: input.code,
+      statusCode: 500,
+      details: {
+        jobId: input.plannerTask.jobId,
+        milestoneId: input.plannerTask.milestoneId,
+        plannerTaskId: input.plannerTask._id,
+        plannedTaskIndex: input.plannedTaskIndex,
+        plannedTaskLocalId: input.plannedTask.localId,
+        plannedTaskIntent: input.plannedTask.intent,
+        ...(input.details ?? {}),
+      },
+    });
   }
 
   private buildTaskConstraints(
@@ -945,6 +1838,7 @@ export class AgentDispatchService {
 
     switch (intent) {
       case "plan_project_phases":
+      case "review_milestone":
         return this.projectOwnerAgentId;
       case "plan_phase_tasks":
       case "plan_next_tasks":
