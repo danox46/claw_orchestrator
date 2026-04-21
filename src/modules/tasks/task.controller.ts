@@ -8,12 +8,19 @@ import { ServiceError } from "../../shared/errors/service-error";
 import type {
   CreateTaskInput as CreateTaskServiceInput,
   TasksServicePort,
+  UpdateTaskInput as UpdateTaskServiceInput,
 } from "./task.service";
 import type {
   CreateTaskInput as CreateTaskRequest,
-  UpdateTaskInput,
+  UpdateTaskInput as UpdateTaskRequest,
 } from "./task.schemas";
 import type { ListTasksQuery, TaskIdParams } from "./task.query.schemas";
+
+type SessionRetryFields = {
+  sessionName?: string;
+  sessionCount?: number;
+  maxSessions?: number;
+};
 
 type CreateTaskLocals = {
   validated?: {
@@ -30,7 +37,7 @@ type GetTaskByIdLocals = {
 type UpdateTaskLocals = {
   validated?: {
     params?: TaskIdParams;
-    body?: UpdateTaskInput;
+    body?: UpdateTaskRequest & SessionRetryFields;
   };
 };
 
@@ -107,9 +114,29 @@ function requireValidatedQuery<T>(
   return query;
 }
 
+function extractSessionRetryFields(
+  input: Partial<SessionRetryFields>,
+): SessionRetryFields {
+  return {
+    ...(typeof input.sessionName === "string"
+      ? { sessionName: input.sessionName }
+      : {}),
+    ...(typeof input.sessionCount === "number"
+      ? { sessionCount: input.sessionCount }
+      : {}),
+    ...(typeof input.maxSessions === "number"
+      ? { maxSessions: input.maxSessions }
+      : {}),
+  };
+}
+
 function toCreateTaskServiceInput(
   input: CreateTaskRequest,
 ): CreateTaskServiceInput {
+  const sessionFields = extractSessionRetryFields(
+    input as CreateTaskRequest & SessionRetryFields,
+  );
+
   return {
     jobId: input.jobId,
     projectId: input.projectId,
@@ -157,6 +184,7 @@ function toCreateTaskServiceInput(
     ...(typeof input.maxAttempts === "number"
       ? { maxAttempts: input.maxAttempts }
       : {}),
+    ...sessionFields,
     ...(input.nextRetryAt instanceof Date
       ? { nextRetryAt: input.nextRetryAt }
       : {}),
@@ -170,6 +198,54 @@ function toCreateTaskServiceInput(
     ...(input.outputs !== undefined ? { outputs: input.outputs } : {}),
     ...(input.artifacts.length > 0 ? { artifacts: input.artifacts } : {}),
     ...(input.errors.length > 0 ? { errors: input.errors } : {}),
+  };
+}
+
+function toUpdateTaskServiceInput(
+  input: UpdateTaskRequest & SessionRetryFields,
+): UpdateTaskServiceInput {
+  const sessionFields = extractSessionRetryFields(input);
+
+  return {
+    ...(typeof input.milestoneId === "string"
+      ? { milestoneId: input.milestoneId }
+      : {}),
+    ...(typeof input.parentTaskId === "string"
+      ? { parentTaskId: input.parentTaskId }
+      : {}),
+    ...(Array.isArray(input.dependencies)
+      ? { dependencies: [...input.dependencies] }
+      : {}),
+    ...(typeof input.status === "string" ? { status: input.status } : {}),
+    ...(typeof input.attemptCount === "number"
+      ? { attemptCount: input.attemptCount }
+      : {}),
+    ...(typeof input.maxAttempts === "number"
+      ? { maxAttempts: input.maxAttempts }
+      : {}),
+    ...sessionFields,
+    ...(input.nextRetryAt instanceof Date
+      ? { nextRetryAt: input.nextRetryAt }
+      : {}),
+    ...(typeof input.lastError === "string"
+      ? { lastError: input.lastError }
+      : {}),
+    ...(typeof input.retryable === "boolean"
+      ? { retryable: input.retryable }
+      : {}),
+    ...(typeof input.sequence === "number" ? { sequence: input.sequence } : {}),
+    ...(input.outputs !== undefined ? { outputs: input.outputs } : {}),
+    ...(Array.isArray(input.artifacts)
+      ? { artifacts: [...input.artifacts] }
+      : {}),
+    ...(Array.isArray(input.errors) ? { errors: [...input.errors] } : {}),
+    ...(input.target !== undefined
+      ? {
+          target: {
+            agentId: input.target.agentId,
+          },
+        }
+      : {}),
   };
 }
 
@@ -205,7 +281,10 @@ export function createTasksController(
     ): Promise<void> => {
       const { taskId } = requireValidatedParams(res);
       const updates = requireValidatedBody(res);
-      const task = await tasksService.updateTask(taskId, updates);
+      const task = await tasksService.updateTask(
+        taskId,
+        toUpdateTaskServiceInput(updates),
+      );
 
       res.status(200).json(successResponse(task));
     },

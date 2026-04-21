@@ -25,6 +25,22 @@ export const taskIntentSchema = z.enum([
 
 export const sandboxModeSchema = z.enum(["off", "non-main", "all"]);
 
+export const sessionNameSchema = z
+  .string()
+  .trim()
+  .min(1, "sessionName cannot be empty")
+  .max(255, "sessionName must be at most 255 characters long");
+
+export const sessionCountSchema = z
+  .number()
+  .int("sessionCount must be an integer")
+  .min(1, "sessionCount must be at least 1");
+
+export const maxSessionsSchema = z
+  .number()
+  .int("maxSessions must be an integer")
+  .min(1, "maxSessions must be at least 1");
+
 export const issuerSchema = z.object({
   kind: z.enum(["system", "agent"]),
   id: z
@@ -113,6 +129,12 @@ export const createTaskSchema = z.object({
     .positive("maxAttempts must be greater than 0")
     .default(3),
 
+  sessionName: sessionNameSchema.optional(),
+
+  sessionCount: sessionCountSchema.default(1),
+
+  maxSessions: maxSessionsSchema.default(2),
+
   nextRetryAt: z.coerce.date().optional(),
 
   lastError: z
@@ -164,6 +186,12 @@ export const updateTaskSchema = z
       .int("maxAttempts must be an integer")
       .positive("maxAttempts must be greater than 0")
       .optional(),
+
+    sessionName: sessionNameSchema.optional(),
+
+    sessionCount: sessionCountSchema.optional(),
+
+    maxSessions: maxSessionsSchema.optional(),
 
     nextRetryAt: z.coerce.date().optional(),
 

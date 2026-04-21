@@ -30,6 +30,9 @@ export type CreateTaskInput = {
   status?: TaskStatus;
   attemptCount?: number;
   maxAttempts?: number;
+  sessionName?: string;
+  sessionCount?: number;
+  maxSessions?: number;
   nextRetryAt?: Date;
   lastError?: string;
   retryable?: boolean;
@@ -39,7 +42,11 @@ export type CreateTaskInput = {
   errors?: string[];
 };
 
-export type UpdateTaskInput = UpdateTaskRequest;
+export type UpdateTaskInput = UpdateTaskRequest & {
+  sessionName?: string;
+  sessionCount?: number;
+  maxSessions?: number;
+};
 
 export type TaskRecord = {
   _id: string;
@@ -59,6 +66,9 @@ export type TaskRecord = {
   status: TaskStatus;
   attemptCount: number;
   maxAttempts: number;
+  sessionName?: string;
+  sessionCount: number;
+  maxSessions: number;
   nextRetryAt?: Date;
   lastError?: string;
   retryable: boolean;
@@ -78,6 +88,9 @@ export type ListTasksInput = {
   status?: TaskStatus;
   intent?: TaskIntent;
   agentId?: string;
+  sessionName?: string;
+  sessionCount?: number;
+  maxSessions?: number;
   limit?: number;
   skip?: number;
 };
@@ -91,6 +104,9 @@ export type CountTasksInput = Pick<
   | "status"
   | "intent"
   | "agentId"
+  | "sessionName"
+  | "sessionCount"
+  | "maxSessions"
 >;
 
 export interface TasksServicePort {
@@ -173,6 +189,9 @@ type TaskDocumentLike = {
   status: TaskStatus;
   attemptCount: number;
   maxAttempts: number;
+  sessionName?: string | null;
+  sessionCount: number;
+  maxSessions: number;
   nextRetryAt?: Date | null;
   lastError?: string | null;
   retryable: boolean;
@@ -241,6 +260,20 @@ function mapTask(document: TaskDocumentLike): TaskRecord {
     status: document.status,
     attemptCount: document.attemptCount,
     maxAttempts: document.maxAttempts,
+    ...(typeof document.sessionName === "string" &&
+    document.sessionName.length > 0
+      ? { sessionName: document.sessionName }
+      : {}),
+    sessionCount:
+      typeof document.sessionCount === "number" &&
+      Number.isFinite(document.sessionCount)
+        ? document.sessionCount
+        : 1,
+    maxSessions:
+      typeof document.maxSessions === "number" &&
+      Number.isFinite(document.maxSessions)
+        ? document.maxSessions
+        : 1,
     ...(document.nextRetryAt instanceof Date
       ? { nextRetryAt: document.nextRetryAt }
       : {}),
@@ -265,18 +298,29 @@ function normalizeCreateTaskInput(input: CreateTaskInput): {
   status: TaskStatus;
   attemptCount: number;
   maxAttempts: number;
+  sessionName?: string;
+  sessionCount: number;
+  maxSessions: number;
   retryable: boolean;
   sequence: number;
   artifacts: string[];
   errors: string[];
   dependencies: string[];
 } {
+  const sessionName =
+    typeof input.sessionName === "string" && input.sessionName.trim().length > 0
+      ? input.sessionName.trim()
+      : undefined;
+
   return {
     requiredArtifacts: [...(input.requiredArtifacts ?? [])],
     acceptanceCriteria: [...(input.acceptanceCriteria ?? [])],
     status: input.status ?? "queued",
     attemptCount: input.attemptCount ?? 0,
-    maxAttempts: input.maxAttempts ?? 10,
+    maxAttempts: input.maxAttempts ?? 5,
+    ...(sessionName ? { sessionName } : {}),
+    sessionCount: input.sessionCount ?? 1,
+    maxSessions: input.maxSessions ?? 4,
     retryable: input.retryable ?? true,
     sequence: input.sequence ?? 0,
     artifacts: [...(input.artifacts ?? [])],
@@ -348,6 +392,11 @@ export class TaskService implements TasksServicePort {
         status: normalized.status,
         attemptCount: normalized.attemptCount,
         maxAttempts: normalized.maxAttempts,
+        ...(normalized.sessionName
+          ? { sessionName: normalized.sessionName }
+          : {}),
+        sessionCount: normalized.sessionCount,
+        maxSessions: normalized.maxSessions,
         ...(input.nextRetryAt instanceof Date
           ? { nextRetryAt: input.nextRetryAt }
           : {}),
@@ -478,6 +527,21 @@ export class TaskService implements TasksServicePort {
 
     if (typeof updates.maxAttempts === "number") {
       updatePayload.maxAttempts = updates.maxAttempts;
+    }
+
+    if (typeof updates.sessionName === "string") {
+      const trimmedSessionName = updates.sessionName.trim();
+      if (trimmedSessionName.length > 0) {
+        updatePayload.sessionName = trimmedSessionName;
+      }
+    }
+
+    if (typeof updates.sessionCount === "number") {
+      updatePayload.sessionCount = updates.sessionCount;
+    }
+
+    if (typeof updates.maxSessions === "number") {
+      updatePayload.maxSessions = updates.maxSessions;
     }
 
     if (updates.nextRetryAt instanceof Date) {
@@ -889,6 +953,18 @@ export class TaskService implements TasksServicePort {
 
     if (typeof input.agentId === "string") {
       filter["target.agentId"] = input.agentId.trim();
+    }
+
+    if (typeof input.sessionName === "string") {
+      filter.sessionName = input.sessionName.trim();
+    }
+
+    if (typeof input.sessionCount === "number") {
+      filter.sessionCount = input.sessionCount;
+    }
+
+    if (typeof input.maxSessions === "number") {
+      filter.maxSessions = input.maxSessions;
     }
 
     return filter;

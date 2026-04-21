@@ -167,6 +167,7 @@ export class AgentDispatchService {
     const attemptNumber = isQaDispatch
       ? Math.max(task.attemptCount, 1)
       : task.attemptCount + 1;
+    const sessionState = this.getTaskSessionState(task);
 
     const dispatchLogger = logger.child({
       jobId: job._id,
@@ -177,6 +178,8 @@ export class AgentDispatchService {
       agentId: task.target.agentId,
       attemptNumber,
       maxAttempts: task.maxAttempts,
+      sessionCount: sessionState.sessionCount,
+      maxSessions: sessionState.maxSessions,
       sequence: task.sequence,
     });
 
@@ -195,6 +198,9 @@ export class AgentDispatchService {
 
       const sendResult = await this.openClawClient.sendTask({
         agentId: task.target.agentId,
+        ...(sessionState.sessionName
+          ? { sessionId: sessionState.sessionName }
+          : {}),
         payload: {
           projectId: task.projectId,
           jobId: task.jobId,
@@ -217,6 +223,11 @@ export class AgentDispatchService {
           idempotencyKey: task.idempotencyKey,
           attemptNumber,
           maxAttempts: task.maxAttempts,
+          ...(sessionState.sessionName
+            ? { sessionName: sessionState.sessionName }
+            : {}),
+          sessionCount: sessionState.sessionCount,
+          maxSessions: sessionState.maxSessions,
           ...(task.errors.length > 0 ? { errors: task.errors } : {}),
           ...(typeof task.lastError === "string" &&
           task.lastError.trim().length > 0
@@ -227,7 +238,10 @@ export class AgentDispatchService {
         },
       });
 
-      const finalResult = await this.resolveFinalResult(sendResult);
+      const finalResult = await this.resolveFinalResult({
+        ...sendResult,
+        agentId: sendResult.agentId ?? task.target.agentId,
+      });
 
       if (finalResult.status !== "succeeded") {
         const failureMessage = this.buildFailureMessage(finalResult);
@@ -363,6 +377,8 @@ export class AgentDispatchService {
     outputs?: Record<string, unknown>;
     artifacts?: unknown;
   }): Promise<void> {
+    const normalizedArtifacts = this.normalizeTaskArtifactRefs(input.artifacts);
+
     if (this.shouldRetryTask(input.task, input.attemptNumber)) {
       const nextRetryAt = this.computeNextRetryAt(input.attemptNumber);
 
@@ -371,8 +387,8 @@ export class AgentDispatchService {
         error: input.failureMessage,
         ...(nextRetryAt ? { nextRetryAt } : {}),
         ...(input.outputs ? { outputs: input.outputs } : {}),
-        ...(this.normalizeTaskArtifactRefs(input.artifacts).length > 0
-          ? { artifacts: this.normalizeTaskArtifactRefs(input.artifacts) }
+        ...(normalizedArtifacts.length > 0
+          ? { artifacts: normalizedArtifacts }
           : {}),
       });
 
@@ -387,24 +403,42 @@ export class AgentDispatchService {
       return;
     }
 
+    if (this.shouldRotateTaskSession(input.task)) {
+      await this.rotateTaskSessionAndRequeue({
+        task: input.task,
+        dispatchLogger: input.dispatchLogger,
+        failureMessage: input.failureMessage,
+        ...(input.outputs ? { outputs: input.outputs } : {}),
+        ...(normalizedArtifacts.length > 0
+          ? { artifacts: normalizedArtifacts }
+          : {}),
+      });
+
+      return;
+    }
+
     await this.tasksService.markFailedExhausted({
       taskId: input.task._id,
       errors: [input.failureMessage],
       ...(input.outputs ? { outputs: input.outputs } : {}),
-      ...(this.normalizeTaskArtifactRefs(input.artifacts).length > 0
-        ? { artifacts: this.normalizeTaskArtifactRefs(input.artifacts) }
+      ...(normalizedArtifacts.length > 0
+        ? { artifacts: normalizedArtifacts }
         : {}),
     });
 
     await this.jobsService.markFailed(input.job._id, input.failureMessage);
+
+    const sessionState = this.getTaskSessionState(input.task);
 
     input.dispatchLogger.warn(
       {
         failureMessage: input.failureMessage,
         attemptNumber: input.attemptNumber,
         maxAttempts: input.task.maxAttempts,
+        sessionCount: sessionState.sessionCount,
+        maxSessions: sessionState.maxSessions,
       },
-      "Task exhausted all retries and job was marked FAILED.",
+      "Task exhausted all retries and sessions and job was marked FAILED.",
     );
   }
 
@@ -450,6 +484,21 @@ export class AgentDispatchService {
       return;
     }
 
+    if (this.shouldRotateTaskSession(input.task)) {
+      await this.rotateTaskSessionAndRequeue({
+        task: input.task,
+        dispatchLogger: input.dispatchLogger,
+        failureMessage: input.failureMessage,
+        resetTargetAgentId: this.implementerAgentId,
+        ...(input.outputs ? { outputs: input.outputs } : {}),
+        ...(normalizedArtifacts.length > 0
+          ? { artifacts: normalizedArtifacts }
+          : {}),
+      });
+
+      return;
+    }
+
     await this.tasksService.markFailedExhausted({
       taskId: input.task._id,
       errors: [input.failureMessage],
@@ -461,13 +510,17 @@ export class AgentDispatchService {
 
     await this.jobsService.markFailed(input.job._id, input.failureMessage);
 
+    const sessionState = this.getTaskSessionState(input.task);
+
     input.dispatchLogger.warn(
       {
         failureMessage: input.failureMessage,
         attemptNumber: input.attemptNumber,
         maxAttempts: input.task.maxAttempts,
+        sessionCount: sessionState.sessionCount,
+        maxSessions: sessionState.maxSessions,
       },
-      "QA review failed, retries were exhausted, and the job was marked FAILED.",
+      "QA review failed, retries and sessions were exhausted, and the job was marked FAILED.",
     );
   }
 
@@ -479,6 +532,13 @@ export class AgentDispatchService {
 
   private shouldRetryTask(task: TaskRecord, attemptNumber: number): boolean {
     return task.retryable && attemptNumber < task.maxAttempts;
+  }
+
+  private shouldRotateTaskSession(task: TaskRecord): boolean {
+    const sessionState = this.getTaskSessionState(task);
+    return (
+      task.retryable && sessionState.sessionCount < sessionState.maxSessions
+    );
   }
 
   private computeNextRetryAt(attemptNumber: number): Date | undefined {
@@ -497,6 +557,115 @@ export class AgentDispatchService {
     }
 
     return new Date(now + 300_000);
+  }
+
+  private async rotateTaskSessionAndRequeue(input: {
+    task: TaskRecord;
+    dispatchLogger: typeof logger;
+    failureMessage: string;
+    outputs?: Record<string, unknown>;
+    artifacts?: string[];
+    resetTargetAgentId?: string;
+  }): Promise<void> {
+    const currentSessionState = this.getTaskSessionState(input.task);
+    const nextSessionCount = currentSessionState.sessionCount + 1;
+    const nextSessionName = this.buildTaskSessionName(
+      input.task,
+      currentSessionState.sessionName,
+      nextSessionCount,
+    );
+
+    await this.tasksService.updateTask(input.task._id, {
+      attemptCount: 0,
+      sessionCount: nextSessionCount,
+      sessionName: nextSessionName,
+      ...(typeof input.resetTargetAgentId === "string" &&
+      input.resetTargetAgentId.trim().length > 0
+        ? {
+            target: {
+              agentId: input.resetTargetAgentId.trim(),
+            },
+          }
+        : {}),
+    });
+
+    await this.tasksService.requeueTask({
+      taskId: input.task._id,
+      error: input.failureMessage,
+      ...(input.outputs ? { outputs: input.outputs } : {}),
+      ...(Array.isArray(input.artifacts) && input.artifacts.length > 0
+        ? { artifacts: input.artifacts }
+        : {}),
+    });
+
+    input.dispatchLogger.warn(
+      {
+        failureMessage: input.failureMessage,
+        previousSessionName: currentSessionState.sessionName,
+        nextSessionName,
+        previousSessionCount: currentSessionState.sessionCount,
+        nextSessionCount,
+        maxSessions: currentSessionState.maxSessions,
+        ...(typeof input.resetTargetAgentId === "string" &&
+        input.resetTargetAgentId.trim().length > 0
+          ? { resetTargetAgentId: input.resetTargetAgentId.trim() }
+          : {}),
+      },
+      "Task exhausted retries in the current session and was requeued into a fresh session.",
+    );
+  }
+
+  private getTaskSessionState(task: TaskRecord): {
+    sessionName: string;
+    sessionCount: number;
+    maxSessions: number;
+  } {
+    const taskRecord = task as TaskRecord & {
+      sessionName?: unknown;
+      sessionCount?: unknown;
+      maxSessions?: unknown;
+    };
+
+    const sessionNameValue = taskRecord.sessionName;
+    const sessionCountValue = taskRecord.sessionCount;
+    const maxSessionsValue = taskRecord.maxSessions;
+
+    const sessionName =
+      typeof sessionNameValue === "string" && sessionNameValue.trim().length > 0
+        ? sessionNameValue.trim()
+        : this.buildTaskSessionBaseName(task);
+    const sessionCount =
+      typeof sessionCountValue === "number" &&
+      Number.isFinite(sessionCountValue)
+        ? Math.max(Math.trunc(sessionCountValue), 1)
+        : 1;
+    const maxSessions =
+      typeof maxSessionsValue === "number" && Number.isFinite(maxSessionsValue)
+        ? Math.max(Math.trunc(maxSessionsValue), 1)
+        : 2;
+
+    return {
+      sessionName,
+      sessionCount,
+      maxSessions,
+    };
+  }
+
+  private buildTaskSessionBaseName(task: TaskRecord): string {
+    return `orchestrator:agent:${task.target.agentId}:task:${task._id}`;
+  }
+
+  private buildTaskSessionName(
+    task: TaskRecord,
+    baseSessionName: string | undefined,
+    sessionCount: number,
+  ): string {
+    const base =
+      typeof baseSessionName === "string" && baseSessionName.trim().length > 0
+        ? baseSessionName.trim().replace(/:session-attempt:\d+$/u, "")
+        : this.buildTaskSessionBaseName(task);
+
+    return `${base}:session-attempt:${Math.max(Math.trunc(sessionCount), 1)}`;
   }
 
   private async enqueueFollowUpWork(input: {
@@ -725,122 +894,188 @@ export class AgentDispatchService {
     const resolvedTasks: Array<{
       preparedTask: PreparedConcreteTask;
       taskRecord: TaskRecord;
+      created: boolean;
     }> = [];
 
     const createdTaskIds: string[] = [];
+    const syncedExistingTaskRollbackStates: Array<{
+      taskId: string;
+      dependencies: string[];
+      sequence: number;
+      status: TaskRecord["status"];
+    }> = [];
+    let reviewTaskResult:
+      | {
+          reviewTaskId: string;
+          created: boolean;
+          updated: boolean;
+        }
+      | undefined;
     let skippedExistingTaskCount = 0;
 
-    for (const preparedTask of preparedTasks) {
-      let taskRecord = preparedTask.existingTask;
+    try {
+      for (const preparedTask of preparedTasks) {
+        let taskRecord = preparedTask.existingTask;
+        let created = false;
 
-      if (!taskRecord) {
-        taskRecord = await createTask({
-          jobId: input.task.jobId,
-          projectId: input.task.projectId,
-          milestoneId: input.task.milestoneId,
-          parentTaskId: input.task._id,
-          dependencies: [],
-          issuer: {
-            kind: "system",
-            id: "app-factory-orchestrator",
-            role: "orchestrator",
-          },
-          target: {
-            agentId: preparedTask.targetAgentId,
-          },
-          intent: preparedTask.createIntent,
-          inputs: preparedTask.inputs,
-          constraints: preparedTask.constraints,
-          requiredArtifacts: preparedTask.plannedTask.requiredArtifacts,
-          acceptanceCriteria: preparedTask.plannedTask.acceptanceCriteria,
-          idempotencyKey: preparedTask.idempotencyKey,
-          sequence: preparedTask.sequence,
+        if (!taskRecord) {
+          taskRecord = await createTask({
+            jobId: input.task.jobId,
+            projectId: input.task.projectId,
+            milestoneId: input.task.milestoneId,
+            parentTaskId: input.task._id,
+            dependencies: [],
+            issuer: {
+              kind: "system",
+              id: "app-factory-orchestrator",
+              role: "orchestrator",
+            },
+            target: {
+              agentId: preparedTask.targetAgentId,
+            },
+            intent: preparedTask.createIntent,
+            inputs: preparedTask.inputs,
+            constraints: preparedTask.constraints,
+            requiredArtifacts: preparedTask.plannedTask.requiredArtifacts,
+            acceptanceCriteria: preparedTask.plannedTask.acceptanceCriteria,
+            idempotencyKey: preparedTask.idempotencyKey,
+            sequence: preparedTask.sequence,
+          });
+
+          existingByIdempotencyKey.set(preparedTask.idempotencyKey, taskRecord);
+          createdTaskIds.push(taskRecord._id);
+          created = true;
+        } else {
+          skippedExistingTaskCount += 1;
+        }
+
+        resolvedTasks.push({
+          preparedTask,
+          taskRecord,
+          created,
         });
-
-        existingByIdempotencyKey.set(preparedTask.idempotencyKey, taskRecord);
-        createdTaskIds.push(taskRecord._id);
-      } else {
-        skippedExistingTaskCount += 1;
       }
 
-      resolvedTasks.push({
-        preparedTask,
-        taskRecord,
-      });
-    }
+      const referenceToTaskId = new Map<string, string>();
 
-    const referenceToTaskId = new Map<string, string>();
-
-    for (const resolvedTask of resolvedTasks) {
-      for (const referenceKey of resolvedTask.preparedTask.referenceKeys) {
-        if (!referenceToTaskId.has(referenceKey)) {
-          referenceToTaskId.set(referenceKey, resolvedTask.taskRecord._id);
+      for (const resolvedTask of resolvedTasks) {
+        for (const referenceKey of resolvedTask.preparedTask.referenceKeys) {
+          if (!referenceToTaskId.has(referenceKey)) {
+            referenceToTaskId.set(referenceKey, resolvedTask.taskRecord._id);
+          }
         }
       }
-    }
 
-    for (const resolvedTask of resolvedTasks) {
-      if (resolvedTask.preparedTask.dependencyRefs.length === 0) {
-        continue;
-      }
+      for (const resolvedTask of resolvedTasks) {
+        const dependencyTaskIds: string[] = [];
 
-      const dependencyTaskIds: string[] = [];
+        for (const dependencyRef of resolvedTask.preparedTask.dependencyRefs) {
+          const dependencyTaskId = referenceToTaskId.get(dependencyRef);
 
-      for (const dependencyRef of resolvedTask.preparedTask.dependencyRefs) {
-        const dependencyTaskId = referenceToTaskId.get(dependencyRef);
+          if (!dependencyTaskId) {
+            throw this.createPlannedTaskValidationError({
+              code: "PLANNED_TASK_DEPENDENCY_RUNTIME_UNRESOLVED",
+              message: `Validated dependency "${dependencyRef}" could not be resolved to a created task for ${this.describePlannedTask(resolvedTask.preparedTask.plannedTask, resolvedTask.preparedTask.index)}.`,
+              plannerTask: input.task,
+              plannedTask: resolvedTask.preparedTask.plannedTask,
+              plannedTaskIndex: resolvedTask.preparedTask.index,
+              details: {
+                dependencyRef,
+                idempotencyKey: resolvedTask.preparedTask.idempotencyKey,
+              },
+            });
+          }
 
-        if (!dependencyTaskId) {
-          throw this.createPlannedTaskValidationError({
-            code: "PLANNED_TASK_DEPENDENCY_RUNTIME_UNRESOLVED",
-            message: `Validated dependency "${dependencyRef}" could not be resolved to a created task for ${this.describePlannedTask(resolvedTask.preparedTask.plannedTask, resolvedTask.preparedTask.index)}.`,
-            plannerTask: input.task,
-            plannedTask: resolvedTask.preparedTask.plannedTask,
-            plannedTaskIndex: resolvedTask.preparedTask.index,
-            details: {
-              dependencyRef,
-              idempotencyKey: resolvedTask.preparedTask.idempotencyKey,
-            },
+          if (
+            dependencyTaskId !== resolvedTask.taskRecord._id &&
+            !dependencyTaskIds.includes(dependencyTaskId)
+          ) {
+            dependencyTaskIds.push(dependencyTaskId);
+          }
+        }
+
+        const currentDependencyIds = [
+          ...resolvedTask.taskRecord.dependencies,
+        ].sort();
+        const nextDependencyIds = [...dependencyTaskIds].sort();
+        const shouldUpdateDependencies = !(
+          currentDependencyIds.length === nextDependencyIds.length &&
+          currentDependencyIds.every(
+            (value, index) => value === nextDependencyIds[index],
+          )
+        );
+        const shouldUpdateSequence =
+          resolvedTask.taskRecord.sequence !==
+          resolvedTask.preparedTask.sequence;
+        const shouldResetQueued = this.shouldResetConcreteTaskToQueued(
+          resolvedTask.taskRecord,
+        );
+
+        if (
+          !shouldUpdateDependencies &&
+          !shouldUpdateSequence &&
+          !shouldResetQueued
+        ) {
+          continue;
+        }
+
+        if (!resolvedTask.created) {
+          syncedExistingTaskRollbackStates.push({
+            taskId: resolvedTask.taskRecord._id,
+            dependencies: [...resolvedTask.taskRecord.dependencies],
+            sequence: resolvedTask.taskRecord.sequence,
+            status: resolvedTask.taskRecord.status,
           });
         }
 
-        if (
-          dependencyTaskId !== resolvedTask.taskRecord._id &&
-          !dependencyTaskIds.includes(dependencyTaskId)
-        ) {
-          dependencyTaskIds.push(dependencyTaskId);
-        }
+        await this.tasksService.updateTask(resolvedTask.taskRecord._id, {
+          ...(shouldUpdateDependencies
+            ? { dependencies: dependencyTaskIds }
+            : {}),
+          ...(shouldUpdateSequence
+            ? { sequence: resolvedTask.preparedTask.sequence }
+            : {}),
+          ...(shouldResetQueued ? { status: "queued" } : {}),
+        });
       }
 
-      const currentDependencyIds = [
-        ...resolvedTask.taskRecord.dependencies,
-      ].sort();
-      const nextDependencyIds = [...dependencyTaskIds].sort();
-
-      if (
-        currentDependencyIds.length === nextDependencyIds.length &&
-        currentDependencyIds.every(
-          (value, index) => value === nextDependencyIds[index],
-        )
-      ) {
-        continue;
-      }
-
-      await this.tasksService.updateTask(resolvedTask.taskRecord._id, {
-        dependencies: dependencyTaskIds,
+      reviewTaskResult = await this.ensureMilestoneReviewTask({
+        createTask,
+        plannerTask: input.task,
+        milestone,
+        phaseId,
+        phaseName,
+        ...(phaseGoal ? { phaseGoal } : {}),
+        concreteTasks: resolvedTasks.map(
+          (resolvedTask) => resolvedTask.taskRecord,
+        ),
       });
+    } catch (error) {
+      await this.rollbackConcreteMilestoneTaskBatch({
+        createdTaskIds,
+        ...(reviewTaskResult?.created
+          ? { createdReviewTaskId: reviewTaskResult.reviewTaskId }
+          : {}),
+        syncedExistingTaskRollbackStates,
+        dispatchLogger: input.dispatchLogger,
+      });
+
+      throw error;
     }
 
-    const reviewTaskResult = await this.ensureMilestoneReviewTask({
-      createTask,
-      plannerTask: input.task,
-      milestone,
-      phaseId,
-      phaseName,
-      ...(phaseGoal ? { phaseGoal } : {}),
-      concreteTasks: resolvedTasks.map(
-        (resolvedTask) => resolvedTask.taskRecord,
-      ),
-    });
+    if (!reviewTaskResult) {
+      throw createServiceError({
+        message:
+          "Milestone planning batch completed without producing a review task result.",
+        code: "MILESTONE_REVIEW_SYNC_MISSING",
+        statusCode: 500,
+        details: {
+          jobId: input.task.jobId,
+          taskId: input.task._id,
+          milestoneId: input.task.milestoneId,
+        },
+      });
+    }
 
     input.dispatchLogger.info(
       {
@@ -852,7 +1087,85 @@ export class AgentDispatchService {
         reviewTaskCreated: reviewTaskResult.created,
         reviewTaskUpdated: reviewTaskResult.updated,
       },
-      "Created concrete milestone tasks, verified dependencies, and synced the milestone review task.",
+      "Committed concrete milestone tasks and synced the milestone review task atomically for the planning batch.",
+    );
+  }
+
+  private shouldResetConcreteTaskToQueued(task: TaskRecord): boolean {
+    return task.status === "failed" || task.status === "canceled";
+  }
+
+  private async rollbackConcreteMilestoneTaskBatch(input: {
+    createdTaskIds: string[];
+    createdReviewTaskId?: string;
+    syncedExistingTaskRollbackStates: Array<{
+      taskId: string;
+      dependencies: string[];
+      sequence: number;
+      status: TaskRecord["status"];
+    }>;
+    dispatchLogger: typeof logger;
+  }): Promise<void> {
+    const rollbackErrors: Array<{ taskId: string; message: string }> = [];
+
+    for (const rollbackState of [
+      ...input.syncedExistingTaskRollbackStates,
+    ].reverse()) {
+      try {
+        await this.tasksService.updateTask(rollbackState.taskId, {
+          dependencies: rollbackState.dependencies,
+          sequence: rollbackState.sequence,
+          status: rollbackState.status,
+        });
+      } catch (error) {
+        rollbackErrors.push({
+          taskId: rollbackState.taskId,
+          message:
+            error instanceof Error ? error.message : "Unknown rollback error",
+        });
+      }
+    }
+
+    const createdTaskIds = [...input.createdTaskIds];
+    if (input.createdReviewTaskId) {
+      createdTaskIds.push(input.createdReviewTaskId);
+    }
+
+    for (const taskId of createdTaskIds.reverse()) {
+      try {
+        await this.tasksService.updateTask(taskId, {
+          status: "canceled",
+          dependencies: [],
+        });
+      } catch (error) {
+        rollbackErrors.push({
+          taskId,
+          message:
+            error instanceof Error ? error.message : "Unknown rollback error",
+        });
+      }
+    }
+
+    if (rollbackErrors.length > 0) {
+      input.dispatchLogger.error(
+        {
+          rollbackErrors,
+        },
+        "Planning batch rollback encountered errors after a partial task creation failure.",
+      );
+      return;
+    }
+
+    input.dispatchLogger.warn(
+      {
+        rolledBackCreatedTaskIds: input.createdTaskIds,
+        ...(input.createdReviewTaskId
+          ? { rolledBackReviewTaskId: input.createdReviewTaskId }
+          : {}),
+        rolledBackExistingTaskCount:
+          input.syncedExistingTaskRollbackStates.length,
+      },
+      "Rolled back the partial milestone planning batch after a follow-up task creation failure.",
     );
   }
 
@@ -1009,7 +1322,10 @@ export class AgentDispatchService {
   }> {
     const reviewIdempotencyKey = `${input.plannerTask.jobId}:milestone:${input.plannerTask.milestoneId}:review_milestone`;
     const dependencyTaskIds = Array.from(
-      new Set(input.concreteTasks.map((task) => task._id)),
+      new Set([
+        input.plannerTask._id,
+        ...input.concreteTasks.map((task) => task._id),
+      ]),
     );
     const reviewInputs = this.buildMilestoneReviewTaskInputs({
       plannerTask: input.plannerTask,

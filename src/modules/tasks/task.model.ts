@@ -202,7 +202,10 @@ const taskSchema = new Schema(
     /**
      * Retry and scheduling fields.
      * - attemptCount starts at 0 before the first dispatch
-     * - maxAttempts is the total allowed tries
+     * - maxAttempts is the total allowed tries within the current session
+     * - sessionName identifies the current agent session, when applicable
+     * - sessionCount tracks how many sessions have been used for this task
+     * - maxSessions is the total allowed fresh-session escalations
      * - nextRetryAt gates when a queued task becomes runnable again
      * - retryable allows us to opt out for non-retryable tasks later
      * - sequence lets us keep milestone planning/execution ordered
@@ -217,7 +220,29 @@ const taskSchema = new Schema(
     maxAttempts: {
       type: Number,
       required: true,
-      default: 10,
+      default: 3,
+      min: 1,
+    },
+
+    sessionName: {
+      type: String,
+      trim: true,
+      default: undefined,
+      maxlength: 255,
+      index: true,
+    },
+
+    sessionCount: {
+      type: Number,
+      required: true,
+      default: 1,
+      min: 1,
+    },
+
+    maxSessions: {
+      type: Number,
+      required: true,
+      default: 2,
       min: 1,
     },
 
@@ -276,6 +301,8 @@ taskSchema.index({ projectId: 1, milestoneId: 1, createdAt: -1 });
 taskSchema.index({ milestoneId: 1, status: 1, sequence: 1 });
 taskSchema.index({ status: 1, nextRetryAt: 1, updatedAt: 1 });
 taskSchema.index({ "target.agentId": 1, status: 1, nextRetryAt: 1 });
+taskSchema.index({ status: 1, sessionCount: 1, updatedAt: 1 });
+taskSchema.index({ sessionName: 1 }, { sparse: true });
 taskSchema.index({ parentTaskId: 1 }, { sparse: true });
 
 /**

@@ -74,6 +74,9 @@ export type OpenClawTaskPayload = {
   lastError?: string;
   outputs?: Record<string, unknown>;
   artifacts?: string[];
+  sessionName?: string;
+  sessionCount?: number;
+  maxSessions?: number;
 };
 
 export type OpenClawSendTaskInput = {
@@ -239,12 +242,12 @@ export class OpenClawClient {
     sessionId?: string,
     payload?: OpenClawTaskPayload,
   ): Promise<string> {
-    if (typeof sessionId === "string" && sessionId.trim().length > 0) {
-      return sessionId.trim();
+    if (payload) {
+      return this.buildTaskSessionKey(agentId, payload, sessionId);
     }
 
-    if (payload) {
-      return this.buildTaskSessionKey(agentId, payload);
+    if (typeof sessionId === "string" && sessionId.trim().length > 0) {
+      return sessionId.trim();
     }
 
     const session = await this.createSession({
@@ -541,8 +544,26 @@ export class OpenClawClient {
   private buildTaskSessionKey(
     agentId: string,
     payload: OpenClawTaskPayload,
+    baseSessionId?: string,
   ): string {
-    return `orchestrator:${env.app.name}:agent:${agentId}:task:${payload.taskId}`;
+    const baseKey =
+      typeof payload.sessionName === "string" &&
+      payload.sessionName.trim().length > 0
+        ? payload.sessionName.trim()
+        : typeof baseSessionId === "string" && baseSessionId.trim().length > 0
+          ? baseSessionId.trim()
+          : `orchestrator:${env.app.name}:agent:${agentId}:task:${payload.taskId}`;
+
+    const sessionAttempt = this.readSessionAttempt(payload.sessionCount);
+    const normalizedBaseKey = baseKey.replace(/:session-attempt:\d+$/, "");
+
+    return `${normalizedBaseKey}:session-attempt:${sessionAttempt}`;
+  }
+
+  private readSessionAttempt(value: unknown): number {
+    return typeof value === "number" && Number.isInteger(value) && value > 0
+      ? value
+      : 1;
   }
 
   private buildAdhocSessionKey(input: OpenClawCreateSessionInput): string {
