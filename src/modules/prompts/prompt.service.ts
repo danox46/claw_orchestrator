@@ -19,6 +19,16 @@ export type PromptBuildInput = {
   constraints?: string[];
   projectPath?: string;
   retry?: PromptRetryInput;
+  systemTaskType?: string;
+  phaseName?: string;
+  phaseGoal?: string;
+  plannedTaskIntent?: string;
+  taskPlan?: Record<string, unknown>[];
+  milestoneTaskGraph?: Record<string, unknown>;
+  dependencyTaskContext?: Record<string, unknown>[];
+  sourceTask?: Record<string, unknown>;
+  enrichment?: Record<string, unknown>;
+  enrichmentTask?: Record<string, unknown>;
 };
 
 export type PromptContextValue =
@@ -272,6 +282,14 @@ export class PromptService {
       );
     }
 
+    if (explicitIntent === "enrich_task") {
+      return this.buildTaskEnrichmentPromptFromPayload(
+        normalizedInput,
+        constraints,
+        retry,
+      );
+    }
+
     if (!explicitIntent) {
       if (this.shouldUseProjectPhasePlanningPrompt(normalizedPayload.inputs)) {
         return this.buildProjectPhasePlanningPromptFromPayload(
@@ -296,20 +314,174 @@ export class PromptService {
           retry,
         );
       }
+
+      if (
+        this.readString(normalizedPayload.inputs.systemTaskType) ===
+        "enrichment"
+      ) {
+        return this.buildTaskEnrichmentPromptFromPayload(
+          normalizedInput,
+          constraints,
+          retry,
+        );
+      }
     }
 
     const taskPrompt = this.readTaskPrompt(normalizedPayload.inputs);
+    const payloadAcceptanceCriteria =
+      normalizedPayload.acceptanceCriteria &&
+      normalizedPayload.acceptanceCriteria.length > 0
+        ? normalizedPayload.acceptanceCriteria
+        : this.readStringArray(normalizedPayload.inputs.acceptanceCriteria);
+    const payloadTestingCriteria = this.readStringArray(
+      normalizedPayload.inputs.testingCriteria,
+    );
+    const systemTaskType = this.readString(
+      normalizedPayload.inputs.systemTaskType,
+    );
+    const phaseName = this.readString(normalizedPayload.inputs.phaseName);
+    const phaseGoal = this.readString(normalizedPayload.inputs.phaseGoal);
+    const plannedTaskIntent = this.readString(
+      normalizedPayload.inputs.plannedTaskIntent,
+    );
+    const taskPlan = this.readRecordArray(normalizedPayload.inputs.taskPlan);
+    const milestoneTaskGraph = this.readRecord(
+      normalizedPayload.inputs.milestoneTaskGraph,
+    );
+    const dependencyTaskContext = this.readRecordArray(
+      normalizedPayload.inputs.dependencyTaskContext,
+    );
+    const sourceTask = this.readRecord(normalizedPayload.inputs.sourceTask);
+    const enrichment = this.readEnrichmentPayload(
+      normalizedPayload.inputs.enrichment,
+    );
+    const enrichmentTask = this.readRecord(
+      normalizedPayload.inputs.enrichmentTask,
+    );
 
     return this.buildTaskPrompt({
       agentId: input.agentId,
       intent: normalizedPayload.intent,
       taskPrompt,
-      ...(normalizedPayload.acceptanceCriteria
-        ? { acceptanceCriteria: normalizedPayload.acceptanceCriteria }
+      ...(payloadAcceptanceCriteria.length > 0
+        ? { acceptanceCriteria: payloadAcceptanceCriteria }
+        : {}),
+      ...(payloadTestingCriteria.length > 0
+        ? { testingCriteria: payloadTestingCriteria }
         : {}),
       ...(constraints ? { constraints } : {}),
       ...(retry ? { retry } : {}),
+      ...(systemTaskType ? { systemTaskType } : {}),
+      ...(phaseName ? { phaseName } : {}),
+      ...(phaseGoal ? { phaseGoal } : {}),
+      ...(plannedTaskIntent ? { plannedTaskIntent } : {}),
+      ...(taskPlan.length > 0 ? { taskPlan } : {}),
+      ...(milestoneTaskGraph ? { milestoneTaskGraph } : {}),
+      ...(dependencyTaskContext.length > 0 ? { dependencyTaskContext } : {}),
+      ...(sourceTask ? { sourceTask } : {}),
+      ...(enrichment ? { enrichment } : {}),
+      ...(enrichmentTask ? { enrichmentTask } : {}),
     });
+  }
+
+  public buildTaskEnrichmentPromptFromPayload(
+    input: OpenClawPromptBuildInput,
+    constraints?: string[],
+    _retry?: PromptRetryInput,
+  ): string {
+    const payloadInputs = input.payload.inputs;
+    const retry = this.buildRetryInput(input.payload);
+    const projectName =
+      this.readString(payloadInputs.projectName) ?? "Unnamed Project";
+    const phaseName = this.readString(payloadInputs.phaseName);
+    const phaseGoal = this.readString(payloadInputs.phaseGoal);
+    const sourceTask = this.readRecord(payloadInputs.sourceTask);
+    const taskPlan = this.readRecordArray(payloadInputs.taskPlan);
+    const dependencyTaskContext = this.readRecordArray(
+      payloadInputs.dependencyTaskContext,
+    );
+    const milestoneTaskGraph = this.readRecord(
+      payloadInputs.milestoneTaskGraph,
+    );
+
+    const details = [
+      `Project name: ${projectName}`,
+      ...this.optionalLine("Phase name", phaseName),
+      ...this.optionalLine("Phase goal", phaseGoal),
+      "",
+      "Enrich exactly this task without changing the approved plan:",
+      this.stringifyValue(sourceTask ?? {}),
+    ];
+
+    const sourceAcceptanceCriteria = this.readStringArray(
+      sourceTask?.acceptanceCriteria,
+    );
+    const sourceTestingCriteria = this.readStringArray(
+      this.readRecord(sourceTask?.inputs)?.testingCriteria,
+    );
+
+    const requirements = this.renderRequirements({
+      agentId: input.agentId,
+      taskPrompt: this.readTaskPrompt(payloadInputs),
+      ...(sourceAcceptanceCriteria.length > 0
+        ? { acceptanceCriteria: sourceAcceptanceCriteria }
+        : {}),
+      ...(sourceTestingCriteria.length > 0
+        ? { testingCriteria: sourceTestingCriteria }
+        : {}),
+      ...(constraints ? { constraints } : {}),
+      ...(taskPlan.length > 0 ? { taskPlan } : {}),
+      ...(milestoneTaskGraph ? { milestoneTaskGraph } : {}),
+      ...(dependencyTaskContext.length > 0 ? { dependencyTaskContext } : {}),
+      ...(sourceTask ? { sourceTask } : {}),
+      systemTaskType: "enrichment",
+      ...(phaseName ? { phaseName } : {}),
+      ...(phaseGoal ? { phaseGoal } : {}),
+    });
+
+    if (this.isRetry(retry)) {
+      return this.joinSections([
+        this.renderRawSection(promptConfig.sections.task, [
+          "Continue the same task-enrichment work in this session.",
+          `Project name: ${projectName}`,
+          ...(phaseName ? [`Phase name: ${phaseName}`] : []),
+          "Use the existing session context, the source task, and the full task plan to improve this one task only.",
+          "Focus on correcting the specific failure below without changing the approved plan.",
+        ]),
+        this.renderSourceTask(sourceTask),
+        this.renderTaskPlan(taskPlan),
+        this.renderDependencyTaskContext(dependencyTaskContext),
+        this.renderMilestoneTaskGraphSection(milestoneTaskGraph),
+        this.buildRetryBlock(retry),
+        requirements,
+        this.renderList(
+          promptConfig.sections.output,
+          this.getOutputReminder("enrichment"),
+        ),
+      ]);
+    }
+
+    return this.joinSections([
+      this.renderGlobalLayers("session", "execution"),
+      this.renderList(
+        promptConfig.sections.role,
+        this.getAgentRules("project_manager").role,
+      ),
+      this.renderList(
+        promptConfig.sections.intent,
+        this.getIntentRules("enrich_task" as PromptIntentKey),
+      ),
+      this.renderRawSection(promptConfig.sections.task, details),
+      this.renderTaskPlan(taskPlan),
+      this.renderDependencyTaskContext(dependencyTaskContext),
+      this.renderMilestoneTaskGraphSection(milestoneTaskGraph),
+      requirements,
+      this.buildRetryBlock(retry),
+      this.renderList(
+        promptConfig.sections.output,
+        this.getOutputReminder("enrichment"),
+      ),
+    ]);
   }
 
   public buildProjectPhasePlanningPromptFromPayload(
@@ -1012,10 +1184,56 @@ ${lines.join("\n")}`;
     const lines = [
       "Task prompt:",
       input.taskPrompt,
+      ...(input.systemTaskType
+        ? ["", `System task type: ${input.systemTaskType}`]
+        : []),
+      ...(input.plannedTaskIntent
+        ? [`Planned task intent: ${input.plannedTaskIntent}`]
+        : []),
+      ...(input.phaseName ? [`Phase name: ${input.phaseName}`] : []),
+      ...(input.phaseGoal ? [`Phase goal: ${input.phaseGoal}`] : []),
       ...(input.projectPath ? ["", `Project path: ${input.projectPath}`] : []),
     ];
 
-    return this.renderRawSection(promptConfig.sections.task, lines) ?? "";
+    const taskPlanSection = this.shouldRenderGenericTaskPlan(input)
+      ? this.renderTaskPlan(input.taskPlan)
+      : undefined;
+
+    return (
+      this.joinSections([
+        this.renderRawSection(promptConfig.sections.task, lines),
+        this.renderSourceTask(input.sourceTask),
+        taskPlanSection,
+        this.renderDependencyTaskContext(input.dependencyTaskContext),
+        this.renderMilestoneTaskGraphSection(input.milestoneTaskGraph),
+        this.renderEnrichmentContext(input.enrichment),
+        this.renderRelatedEnrichmentTask(input.enrichmentTask),
+      ]) ?? ""
+    );
+  }
+
+  private shouldRenderGenericTaskPlan(input: PromptBuildInput): boolean {
+    if (!input.taskPlan || input.taskPlan.length === 0) {
+      return false;
+    }
+
+    const agentKey = this.resolveAgentKey(input.agentId);
+
+    if (agentKey === "project_manager" || agentKey === "product_owner") {
+      return true;
+    }
+
+    if (
+      input.intent === "plan_project_phases" ||
+      input.intent === "plan_phase_tasks" ||
+      input.intent === "plan_next_tasks" ||
+      input.intent === "review_milestone" ||
+      input.intent === "enrich_task"
+    ) {
+      return true;
+    }
+
+    return false;
   }
 
   private renderRequirements(input: PromptBuildInput): string | undefined {
@@ -1343,7 +1561,7 @@ ${lines.join("\n")}`;
 
   private renderMilestoneReviewOutputGuidance(): string | undefined {
     return this.renderRawSection(promptConfig.sections.output, [
-      "Use the normal task response envelope required by the orchestrator.",
+      'Use this exact response envelope: {"taskId":"<task-id>","status":"succeeded|failed","summary":"","outputs":{"decision":"pass|patch","summary":"","metAcceptanceCriteria":[],"missingOrBrokenItems":[],"patchMilestone":{"title":"","goal":"","description":"","scope":[],"acceptanceCriteria":[]}},"artifacts":[],"errors":[]}',
       'Set outputs.decision to either "pass" or "patch".',
       "Ground the decision in the milestone scope, acceptance criteria, and the evidence summary above.",
       "If the milestone passes, briefly explain which acceptance criteria were met.",
@@ -1351,6 +1569,159 @@ ${lines.join("\n")}`;
       "outputs.patchMilestone must include: title (string), goal (string), description (string), scope (string[]), acceptanceCriteria (string[]).",
       'Recommended outputs shape: {"decision":"pass|patch","summary":"","metAcceptanceCriteria":[],"missingOrBrokenItems":[],"patchMilestone":{"title":"","goal":"","description":"","scope":[],"acceptanceCriteria":[]}}',
       "Do not create execution tasks. Only approve the milestone or define the patch milestone.",
+    ]);
+  }
+
+  private readEnrichmentPayload(
+    value: unknown,
+  ): Record<string, unknown> | undefined {
+    const record = this.readRecord(value);
+    if (!record) {
+      return undefined;
+    }
+
+    return this.readRecord(record.enrichment) ?? record;
+  }
+
+  private renderSourceTask(
+    sourceTask?: Record<string, unknown>,
+  ): string | undefined {
+    if (!sourceTask) {
+      return undefined;
+    }
+
+    return this.renderRawSection("Source Task", [
+      this.stringifyValue(sourceTask),
+    ]);
+  }
+
+  private renderTaskPlan(
+    tasks?: Record<string, unknown>[],
+  ): string | undefined {
+    if (!tasks || tasks.length === 0) {
+      return undefined;
+    }
+
+    const lines: string[] = [];
+
+    for (const [index, task] of tasks.entries()) {
+      if (index >= 12) {
+        break;
+      }
+
+      const localId =
+        this.readString(task.localId) ??
+        this.readString(task.taskId) ??
+        `task-${index + 1}`;
+      const intent = this.readString(task.intent) ?? "unknown";
+      const targetAgentId =
+        this.readString(task.targetAgentId) ??
+        this.readString(this.readRecord(task.target)?.agentId);
+      const dependsOn = this.readStringArray(task.dependsOn);
+      const prompt = this.readString(this.readRecord(task.inputs)?.prompt);
+
+      lines.push(
+        `${index + 1}. ${localId}: intent=${intent}${targetAgentId ? `, target=${targetAgentId}` : ""}${dependsOn.length > 0 ? `, dependsOn=${dependsOn.join(", ")}` : ""}`,
+      );
+
+      if (prompt) {
+        lines.push(`   prompt: ${this.compactTaskReminder(prompt) ?? prompt}`);
+      }
+    }
+
+    if (tasks.length > 12) {
+      lines.push(
+        `Additional planned tasks omitted: ${String(tasks.length - 12)}`,
+      );
+    }
+
+    return this.renderRawSection("Task Plan", lines);
+  }
+
+  private renderDependencyTaskContext(
+    tasks?: Record<string, unknown>[],
+  ): string | undefined {
+    if (!tasks || tasks.length === 0) {
+      return undefined;
+    }
+
+    const lines: string[] = [];
+
+    for (const [index, task] of tasks.entries()) {
+      if (index >= 8) {
+        break;
+      }
+
+      const taskId =
+        this.readString(task.taskId) ??
+        this.readString(task._id) ??
+        this.readString(task.localId) ??
+        `dependency-${index + 1}`;
+      const intent = this.readString(task.intent);
+      const status = this.readString(task.status);
+      const summary =
+        this.readString(task.summary) ??
+        this.readString(task.resultSummary) ??
+        this.readString(task.findingSummary);
+
+      lines.push(
+        `${index + 1}. ${taskId}${intent ? `: intent=${intent}` : ""}${status ? `, status=${status}` : ""}`,
+      );
+
+      if (summary) {
+        lines.push(`   summary: ${summary}`);
+      }
+    }
+
+    if (tasks.length > 8) {
+      lines.push(
+        `Additional dependency context entries omitted: ${String(tasks.length - 8)}`,
+      );
+    }
+
+    return this.renderRawSection("Dependency Task Context", lines);
+  }
+
+  private renderMilestoneTaskGraphSection(
+    graph?: Record<string, unknown>,
+  ): string | undefined {
+    if (!graph) {
+      return undefined;
+    }
+
+    const currentTaskId = this.readString(graph.currentTaskId);
+    const tasks = this.readRecordArray(graph.tasks);
+    const lines = [
+      ...this.optionalLine("Current task id", currentTaskId),
+      ...(tasks.length > 0
+        ? [`Task graph size: ${String(tasks.length)}`]
+        : ["Task graph size: 0"]),
+    ];
+
+    return this.renderRawSection("Milestone Task Graph", lines);
+  }
+
+  private renderEnrichmentContext(
+    enrichment?: Record<string, unknown>,
+  ): string | undefined {
+    if (!enrichment) {
+      return undefined;
+    }
+
+    return this.renderRawSection("Enrichment Context", [
+      this.stringifyValue(enrichment),
+    ]);
+  }
+
+  private renderRelatedEnrichmentTask(
+    enrichmentTask?: Record<string, unknown>,
+  ): string | undefined {
+    if (!enrichmentTask) {
+      return undefined;
+    }
+
+    return this.renderRawSection("Related Enrichment Task", [
+      this.stringifyValue(enrichmentTask),
     ]);
   }
 

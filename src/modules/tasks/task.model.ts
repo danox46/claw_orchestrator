@@ -6,6 +6,41 @@ import {
   type InferSchemaType,
 } from "mongoose";
 
+function isPlainObject(value: unknown): boolean {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isStringArray(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.every((item) => typeof item === "string" && item.trim().length > 0)
+  );
+}
+
+function hasUniqueObjectIds(value: unknown): boolean {
+  if (!Array.isArray(value)) {
+    return false;
+  }
+
+  const normalized = value.map((item) => {
+    if (item instanceof Types.ObjectId) {
+      return item.toString();
+    }
+
+    if (typeof item === "string" && item.trim().length > 0) {
+      return item.trim();
+    }
+
+    return null;
+  });
+
+  if (normalized.some((item) => item === null)) {
+    return false;
+  }
+
+  return new Set(normalized).size === normalized.length;
+}
+
 const issuerSchema = new Schema(
   {
     kind: {
@@ -123,6 +158,10 @@ const taskSchema = new Schema(
         },
       ],
       default: [],
+      validate: {
+        validator: hasUniqueObjectIds,
+        message: "dependencies must contain unique task ids.",
+      },
     },
 
     issuer: {
@@ -149,6 +188,7 @@ const taskSchema = new Schema(
         "plan_phase_tasks",
         "plan_next_tasks",
         "review_milestone",
+        "enrich_task",
       ],
       required: true,
       index: true,
@@ -162,6 +202,10 @@ const taskSchema = new Schema(
       type: Schema.Types.Mixed,
       required: true,
       default: {},
+      validate: {
+        validator: isPlainObject,
+        message: "inputs must be a plain object.",
+      },
     },
 
     constraints: {
@@ -173,12 +217,20 @@ const taskSchema = new Schema(
       type: [String],
       required: true,
       default: [],
+      validate: {
+        validator: isStringArray,
+        message: "requiredArtifacts must contain only non-empty strings.",
+      },
     },
 
     acceptanceCriteria: {
       type: [String],
       required: true,
       default: [],
+      validate: {
+        validator: isStringArray,
+        message: "acceptanceCriteria must contain only non-empty strings.",
+      },
     },
 
     idempotencyKey: {
@@ -276,16 +328,29 @@ const taskSchema = new Schema(
     outputs: {
       type: Schema.Types.Mixed,
       default: undefined,
+      validate: {
+        validator: (value: unknown) =>
+          value === undefined || value === null || isPlainObject(value),
+        message: "outputs must be a plain object when provided.",
+      },
     },
 
     artifacts: {
       type: [String],
       default: [],
+      validate: {
+        validator: isStringArray,
+        message: "artifacts must contain only non-empty strings.",
+      },
     },
 
     errors: {
       type: [String],
       default: [],
+      validate: {
+        validator: isStringArray,
+        message: "errors must contain only non-empty strings.",
+      },
     },
   },
   {
@@ -294,6 +359,24 @@ const taskSchema = new Schema(
     collection: "tasks",
   },
 );
+
+taskSchema.path("attemptCount").validate(function (value: number) {
+  const doc = this as { maxAttempts?: unknown };
+  return (
+    typeof doc.maxAttempts !== "number" ||
+    !Number.isFinite(doc.maxAttempts) ||
+    value <= doc.maxAttempts
+  );
+}, "attemptCount cannot exceed maxAttempts.");
+
+taskSchema.path("sessionCount").validate(function (value: number) {
+  const doc = this as { maxSessions?: unknown };
+  return (
+    typeof doc.maxSessions !== "number" ||
+    !Number.isFinite(doc.maxSessions) ||
+    value <= doc.maxSessions
+  );
+}, "sessionCount cannot exceed maxSessions.");
 
 taskSchema.index({ jobId: 1, createdAt: -1 });
 taskSchema.index({ projectId: 1, createdAt: -1 });

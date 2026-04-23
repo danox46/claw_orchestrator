@@ -21,6 +21,7 @@ export const taskIntentSchema = z.enum([
   "plan_phase_tasks",
   "plan_next_tasks",
   "review_milestone",
+  "enrich_task",
 ]);
 
 export const sandboxModeSchema = z.enum(["off", "non-main", "all"]);

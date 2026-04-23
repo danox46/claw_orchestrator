@@ -4,7 +4,7 @@ export const promptConfig = {
       "You are part of an orchestrated software delivery system.",
       "Follow the task scope exactly.",
       "Do not invent permissions, files, or completed work.",
-      "Respond ONLY in valid JSON format.",
+      "Respond ONLY in valid JSON format here in the chat. (you can create files as needed, but here in the chat only send valid JSON)",
     ],
     execution: [
       "Prefer precise, actionable outputs.",
@@ -41,10 +41,12 @@ export const promptConfig = {
         "We want granular task records for better tracking and execution.",
         "Avoid broad, vague, or multi-purpose tasks.",
         "Prefer dependency-aware sequencing.",
+        "For phase-task planning, return a lightweight task list first. The system will enrich each task later.",
       ],
       output: [
         "Return tasks that are small, ordered, and actionable.",
         "Do not merge architecture, scaffolding, implementation, and validation into a single task unless strictly necessary.",
+        "When enriching a task, improve that task only and preserve the approved plan.",
       ],
     },
     implementer: {
@@ -98,12 +100,23 @@ export const promptConfig = {
       "Keep the phases practical, sequential, and ready for downstream task planning.",
     ],
     plan_phase_tasks: [
-      "Break the milestone into the smallest useful sequence of tasks.",
+      "Break the milestone into the smallest useful ordered task list.",
       "Avoid combining architecture, scaffolding, implementation, and validation in one task.",
-      "Keep tasks dependency-aware and implementation-ready.",
+      "Focus on task purpose, sequence, ownership, acceptance criteria, testing criteria, and dependencies.",
+      "Keep each task lightweight and clear instead of fully enriched.",
+      "Do not over-specify implementation details here. The system will enrich each task later.",
+    ],
+    enrich_task: [
+      "Enrich exactly one already-planned task without changing project or milestone scope.",
+      "Use the full task list to keep the task aligned with the overall plan.",
+      "Improve only the existing task content fields allowed by the contract.",
+      "Do not invent new enrichment fields, metadata, tasks, dependencies, artifacts, or scope.",
+      "Return only a richer prompt and, when helpful, clearer acceptanceCriteria and testingCriteria for this task.",
+      "Do not split the task into new tasks and do not reorder the plan.",
     ],
     implement_task: [
       "Produce concrete implementation progress for the assigned task only.",
+      "Use the provided task plan and enrichment context to stay aligned with the overall milestone.",
     ],
     validate_task: [
       "Evaluate the task outcome against requirements and testing criteria.",
@@ -163,7 +176,8 @@ export const promptConfig = {
     ],
     planner: [
       "Return tasks that are narrow, actionable, and dependency-aware.",
-      "Return only valid JSON.",
+      "Keep the task list lightweight. Do not fully enrich implementation details at the planning stage.",
+      "Return only valid JSON here in the chat.",
       'Use this exact top-level response envelope shape for success: {"taskId":"69e2d6c44433488800342729","status":"succeeded","summary":"","outputs":{"tasks":[...]},"artifacts":[],"errors":[]}',
       'Use this exact top-level response envelope shape for failure: {"taskId":"69e2d6c44433488800342729","status":"failed","summary":"brief reason","outputs":{},"artifacts":[],"errors":["specific blocker"]}',
       "Inside each task, inputs may contain only prompt and testingCriteria.",
@@ -194,9 +208,32 @@ export const promptConfig = {
 "dependsOn": []
 }`,
     ],
+    enrichment: [
+      "Return only valid JSON here in the chat.",
+      'Use this exact top-level response envelope shape for success: {"taskId":"69e2d6c44433488800342729","status":"succeeded","summary":"","outputs":{"enrichment":{"prompt":"","acceptanceCriteria":[],"testingCriteria":[]}},"artifacts":[],"errors":[]}',
+      'Use this exact top-level response envelope shape for failure: {"taskId":"69e2d6c44433488800342729","status":"failed","summary":"brief reason","outputs":{},"artifacts":[],"errors":["specific blocker"]}',
+      "Preserve the approved task scope and plan.",
+      "Do not create new tasks and do not reorder dependencies.",
+      "Do not invent or return any enrichment fields other than prompt, acceptanceCriteria, and testingCriteria.",
+      "prompt is required and must be a clearer, richer rewrite of the existing task prompt.",
+      "acceptanceCriteria is optional and, if included, must be an array of strings.",
+      "testingCriteria is optional and, if included, must be an array of strings.",
+      `Enrichment contract:
+{
+"enrichment": {
+"prompt": "Required richer prompt for the same approved task.",
+"acceptanceCriteria": [
+"optional clearer acceptance criterion"
+],
+"testingCriteria": [
+"optional clearer testing criterion"
+]
+}
+}`,
+    ],
     project_owner: [
       "Return a clear planning or review decision with rationale.",
-      "Return only valid JSON.",
+      "Return only valid JSON here in the chat.",
       `Use this exact response envelope: {"taskId":"69e2d6c44433488800342729","status":"succeeded|failed","summary":"","outputs":{"phases":[{"phaseId":"phase-1","name":"Project Foundation and Setup","goal":"","description":"","dependsOn":[],"inputs":{},"deliverables":[""],"exitCriteria":[""]}]},"artifacts":[],"errors":[]}. If status is "failed", return {"taskId":"69e2d6c44433488800342729","status":"failed","summary":"brief reason","outputs":{},"artifacts":[],"errors":["specific blocker"]}.`,
       `Phase format:
 {
