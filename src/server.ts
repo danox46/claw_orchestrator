@@ -54,6 +54,7 @@ async function bootstrap(): Promise<void> {
     openClawClient,
     tasksService,
     jobsService,
+    projectsService,
     milestonesService,
   });
 

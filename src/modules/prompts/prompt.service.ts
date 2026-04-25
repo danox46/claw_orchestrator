@@ -47,6 +47,19 @@ export type ProjectPhasePlanningPromptInput = {
   deployment?: PromptContextValue;
 };
 
+export type ProjectUpdatePlanningPromptInput = {
+  projectId?: string;
+  projectName: string;
+  userRequest: string;
+  requestType?: string;
+  canonicalProjectRoot?: string;
+  appType?: PromptContextValue;
+  stack?: PromptContextValue;
+  deployment?: PromptContextValue;
+  latestAcceptedMilestoneSummary?: string;
+  latestReviewOutcome?: string;
+};
+
 export type MilestoneTaskPlanningPromptInput = {
   projectName: string;
   milestoneId?: string;
@@ -108,19 +121,8 @@ export class PromptService {
 
     if (this.isRetry(input.retry)) {
       return this.joinSections([
-        this.renderGlobalLayers("session", "execution"),
-        this.renderList(
-          promptConfig.sections.role,
-          this.getAgentRules(agentKey).role,
-        ),
-        this.renderList(
-          promptConfig.sections.intent,
-          this.getIntentRules(intentKey),
-        ),
         this.renderRetryTaskContext(input),
         this.buildRetryBlock(input.retry),
-        this.renderRequirements(input),
-        this.renderOutputGuidance(agentKey),
       ]);
     }
 
@@ -170,7 +172,57 @@ export class PromptService {
       this.renderRawSection(promptConfig.sections.task, details),
       this.renderList(
         promptConfig.sections.output,
-        this.getOutputReminder("planner"),
+        this.getOutputReminder("project_owner"),
+      ),
+    ]);
+  }
+
+  buildProjectUpdatePlanningPrompt(
+    input: ProjectUpdatePlanningPromptInput,
+  ): string {
+    const details = [
+      ...this.optionalLine("Project id", input.projectId),
+      `Project name: ${input.projectName}`,
+      ...this.optionalLine("Request type", input.requestType),
+      ...this.optionalLine(
+        "Canonical project root",
+        input.canonicalProjectRoot,
+      ),
+      ...this.optionalLine("App type", this.formatPromptValue(input.appType)),
+      ...this.optionalLine("Stack", this.formatPromptValue(input.stack)),
+      ...this.optionalLine(
+        "Deployment",
+        this.formatPromptValue(input.deployment),
+      ),
+      ...(input.latestAcceptedMilestoneSummary
+        ? [
+            "",
+            "Latest accepted milestone summary:",
+            input.latestAcceptedMilestoneSummary,
+          ]
+        : []),
+      ...(input.latestReviewOutcome
+        ? ["", "Latest review outcome:", input.latestReviewOutcome]
+        : []),
+      "",
+      "Update request:",
+      input.userRequest,
+    ];
+
+    return this.joinSections([
+      this.renderGlobalLayers("session", "planning"),
+      this.renderList(
+        promptConfig.sections.role,
+        this.getAgentRules("product_owner").role,
+      ),
+      this.renderList(
+        promptConfig.sections.intent,
+        this.getIntentRules(this.resolveProjectUpdatePlanningIntentKey()),
+      ),
+      this.renderRawSection(promptConfig.sections.task, details),
+      this.renderList(
+        promptConfig.sections.output,
+        this.getOutputReminder("project_owner"),
       ),
     ]);
   }
@@ -257,6 +309,23 @@ export class PromptService {
     );
     const retry = this.buildRetryInput(normalizedPayload);
     const explicitIntent = this.readString(normalizedPayload.intent);
+
+    if (this.isRetry(retry)) {
+      return this.buildMinimalPayloadRetryPrompt(normalizedInput, retry);
+    }
+
+    const isProjectUpdatePlanning =
+      explicitIntent === "plan_project_update" ||
+      ((explicitIntent === "plan_project_phases" || !explicitIntent) &&
+        this.shouldUseProjectUpdatePlanningPrompt(normalizedPayload.inputs));
+
+    if (isProjectUpdatePlanning) {
+      return this.buildProjectUpdatePlanningPromptFromPayload(
+        normalizedInput,
+        constraints,
+        retry,
+      );
+    }
 
     if (explicitIntent === "plan_project_phases") {
       return this.buildProjectPhasePlanningPromptFromPayload(
@@ -484,6 +553,116 @@ export class PromptService {
     ]);
   }
 
+  public buildProjectUpdatePlanningPromptFromPayload(
+    input: OpenClawPromptBuildInput,
+    constraints?: string[],
+    _retry?: PromptRetryInput,
+  ): string {
+    const payloadInputs = input.payload.inputs;
+    const retry = this.buildRetryInput(input.payload);
+
+    const projectId =
+      this.readString(payloadInputs.projectId) ??
+      this.readString(input.payload.projectId);
+    const projectName =
+      this.readString(payloadInputs.projectName) ?? "Unnamed Project";
+    const requestType =
+      this.readString(payloadInputs.requestType) ??
+      this.readString(payloadInputs.updateRequestType);
+    const canonicalProjectRoot =
+      this.readString(payloadInputs.canonicalProjectRoot) ??
+      this.readString(payloadInputs.projectPath);
+    const rawUpdateRequest =
+      this.readRawUpdateRequest(payloadInputs) ??
+      this.readRawProjectRequest(payloadInputs) ??
+      this.readString(payloadInputs.userRequest) ??
+      this.readString(payloadInputs.request) ??
+      "No update request was provided.";
+    const latestAcceptedMilestoneSummary =
+      this.readString(payloadInputs.latestAcceptedMilestoneSummary) ??
+      this.readString(payloadInputs.latestMilestoneSummary) ??
+      this.readString(payloadInputs.projectSummary);
+    const latestReviewOutcome =
+      this.readPromptValue(payloadInputs.latestReviewOutcome) ??
+      this.readPromptValue(payloadInputs.reviewOutcome);
+
+    const details = [
+      ...this.optionalLine("Project id", projectId),
+      `Project name: ${projectName}`,
+      ...this.optionalLine("Request type", requestType),
+      ...this.optionalLine("Canonical project root", canonicalProjectRoot),
+      ...this.optionalLine(
+        "App type",
+        this.readPromptValue(payloadInputs.appType),
+      ),
+      ...this.optionalLine("Stack", this.readPromptValue(payloadInputs.stack)),
+      ...this.optionalLine(
+        "Deployment",
+        this.readPromptValue(payloadInputs.deployment),
+      ),
+      ...(latestAcceptedMilestoneSummary
+        ? [
+            "",
+            "Latest accepted milestone summary:",
+            latestAcceptedMilestoneSummary,
+          ]
+        : []),
+      ...(latestReviewOutcome
+        ? ["", "Latest review outcome:", latestReviewOutcome]
+        : []),
+      "",
+      "Update request:",
+      rawUpdateRequest,
+    ];
+
+    const requirements = this.renderRequirements({
+      agentId: input.agentId,
+      taskPrompt: "",
+      ...(constraints ? { constraints } : {}),
+      ...(input.payload.acceptanceCriteria
+        ? { acceptanceCriteria: input.payload.acceptanceCriteria }
+        : {}),
+    });
+
+    if (this.isRetry(retry)) {
+      return this.joinSections([
+        this.renderRawSection(promptConfig.sections.task, [
+          "Continue the same project-update planning task in this session.",
+          ...(projectId ? [`Project id: ${projectId}`] : []),
+          `Project name: ${projectName}`,
+          ...(requestType ? [`Request type: ${requestType}`] : []),
+          "Use the existing session context for the accepted baseline and prior update-planning work.",
+          "Focus on correcting the specific failure below instead of rebuilding the full project lifecycle plan from scratch.",
+        ]),
+        this.buildRetryBlock(retry),
+        requirements,
+        this.renderList(
+          promptConfig.sections.output,
+          this.getOutputReminder("planner"),
+        ),
+      ]);
+    }
+
+    return this.joinSections([
+      this.renderGlobalLayers("session", "planning"),
+      this.renderList(
+        promptConfig.sections.role,
+        this.getAgentRules("product_owner").role,
+      ),
+      this.renderList(
+        promptConfig.sections.intent,
+        this.getIntentRules(this.resolveProjectUpdatePlanningIntentKey()),
+      ),
+      this.renderRawSection(promptConfig.sections.task, details),
+      this.buildRetryBlock(retry),
+      requirements,
+      this.renderList(
+        promptConfig.sections.output,
+        this.getOutputReminder("project_owner"),
+      ),
+    ]);
+  }
+
   public buildProjectPhasePlanningPromptFromPayload(
     input: OpenClawPromptBuildInput,
     constraints?: string[],
@@ -545,7 +724,7 @@ export class PromptService {
         requirements,
         this.renderList(
           promptConfig.sections.output,
-          this.getOutputReminder("planner"),
+          this.getOutputReminder("project_owner"),
         ),
       ]);
     }
@@ -565,7 +744,7 @@ export class PromptService {
       requirements,
       this.renderList(
         promptConfig.sections.output,
-        this.getOutputReminder("planner"),
+        this.getOutputReminder("project_owner"),
       ),
     ]);
   }
@@ -962,6 +1141,30 @@ export class PromptService {
     };
   }
 
+  private shouldUseProjectUpdatePlanningPrompt(
+    inputs: Record<string, unknown>,
+  ): boolean {
+    const updateSignals = [
+      this.readString(inputs.requestType),
+      this.readString(inputs.updateRequestType),
+      this.readString(inputs.canonicalProjectRoot),
+      this.readString(inputs.latestAcceptedMilestoneSummary),
+      this.readString(inputs.latestMilestoneSummary),
+      this.readString(inputs.latestReviewOutcome),
+      this.readString(inputs.reviewOutcome),
+      this.readString(inputs.userRequest),
+      this.readString(inputs.request),
+    ];
+
+    return Boolean(
+      this.readString(inputs.projectName) &&
+      (inputs.isProjectUpdate === true ||
+        updateSignals.some(
+          (value) => typeof value === "string" && value.length > 0,
+        )),
+    );
+  }
+
   private shouldUseProjectPhasePlanningPrompt(
     inputs: Record<string, unknown>,
   ): boolean {
@@ -969,6 +1172,7 @@ export class PromptService {
       this.readString(inputs.projectName) &&
       (this.readString(inputs.projectRequest) ||
         this.readString(inputs.userPrompt)) &&
+      !this.shouldUseProjectUpdatePlanningPrompt(inputs) &&
       !this.shouldUseMilestoneTaskPlanningPrompt(inputs),
     );
   }
@@ -1012,6 +1216,14 @@ export class PromptService {
       "plan_phase_tasks" in promptConfig.intents
         ? "plan_phase_tasks"
         : "plan_milestone_tasks"
+    ) as PromptIntentKey;
+  }
+
+  private resolveProjectUpdatePlanningIntentKey(): PromptIntentKey {
+    return (
+      "plan_project_update" in promptConfig.intents
+        ? "plan_project_update"
+        : "plan_project_phases"
     ) as PromptIntentKey;
   }
 
@@ -1082,54 +1294,120 @@ export class PromptService {
       return undefined;
     }
 
-    const retryRules = [
-      ...this.getGlobalLayer("retry"),
-      ...promptConfig.retries.generic,
-      ...this.getRetryRules(input.failureType),
-    ];
+    const failureMessage =
+      input.failureMessage ??
+      this.compactRetryErrors(input.previousErrors).at(-1) ??
+      promptConfig.content.defaults.missingRetryFailureMessage;
 
-    const lines: string[] = [
-      ...retryRules.map((rule) => `- ${rule}`),
-      `- Attempt number: ${input.attemptNumber}`,
-      "- This is the same task in the same session. Reuse the existing session context instead of restarting the full task.",
-    ];
-
-    if (input.failureType) {
-      lines.push(`- Failure type: ${input.failureType}`);
-    }
-
-    if (input.failureMessage) {
-      lines.push(`- Failure message: ${input.failureMessage}`);
-    }
-
-    if (input.previousSummary) {
-      lines.push(`- Previous summary: ${input.previousSummary}`);
-    }
-
-    if (input.previousArtifacts && input.previousArtifacts.length > 0) {
-      lines.push(`- Previous artifacts: ${input.previousArtifacts.join(", ")}`);
-    }
-
-    const previousErrors = this.compactRetryErrors(input.previousErrors);
-    if (previousErrors.length > 0) {
-      lines.push(...previousErrors.map((error) => `- Prior error: ${error}`));
-    }
-
-    if (
-      input.previousOutputs &&
-      Object.keys(input.previousOutputs).length > 0
-    ) {
-      const outputKeys = Object.keys(input.previousOutputs);
-      lines.push(
-        `- Previous outputs were returned already and remain in session context. Output keys: ${outputKeys.join(", ")}`,
-      );
-    }
-
-    return `${promptConfig.sections.retry}:
-${lines.join("\n")}`;
+    return `${promptConfig.sections.retry}:\n- ${promptConfig.content.labels.failureMessage}: ${failureMessage}`;
   }
 
-  private isRetry(input?: PromptRetryInput): boolean {
+  private buildMinimalPayloadRetryPrompt(
+    input: OpenClawPromptBuildInput,
+    retry: PromptRetryInput,
+  ): string {
+    return (
+      this.joinSections([
+        this.renderRawSection(
+          promptConfig.sections.task,
+          this.resolvePayloadRetryTaskContext(input),
+        ),
+        this.buildRetryBlock(retry),
+      ]) ?? ""
+    );
+  }
+
+  private resolvePayloadRetryTaskContext(
+    input: OpenClawPromptBuildInput,
+  ): string[] {
+    const payloadInputs = input.payload.inputs;
+    const intent = this.readString(input.payload.intent);
+    const projectName =
+      this.readString(payloadInputs.projectName) ??
+      promptConfig.content.defaults.unnamedProject;
+    const projectId =
+      this.readString(payloadInputs.projectId) ??
+      this.readString(input.payload.projectId);
+    const requestType = this.readString(payloadInputs.requestType);
+    const phaseName =
+      this.readString(payloadInputs.phaseName) ??
+      promptConfig.content.defaults.unnamedPhase;
+    const milestoneTitle =
+      this.readString(payloadInputs.milestoneTitle) ??
+      this.readString(payloadInputs.title) ??
+      promptConfig.content.defaults.unnamedMilestone;
+
+    if (
+      intent === "plan_project_update" ||
+      ((intent === "plan_project_phases" || !intent) &&
+        this.shouldUseProjectUpdatePlanningPrompt(payloadInputs))
+    ) {
+      const context = promptConfig.content.retryTaskContexts.projectUpdate;
+      return [
+        context[0],
+        ...(projectId
+          ? [`${promptConfig.content.labels.projectId}: ${projectId}`]
+          : []),
+        `${promptConfig.content.labels.projectName}: ${projectName}`,
+        ...(requestType
+          ? [`${promptConfig.content.labels.requestType}: ${requestType}`]
+          : []),
+        ...context.slice(1),
+      ];
+    }
+
+    if (intent === "plan_project_phases") {
+      const context = promptConfig.content.retryTaskContexts.projectPhases;
+      return [
+        context[0],
+        `${promptConfig.content.labels.projectName}: ${projectName}`,
+        ...context.slice(1),
+      ];
+    }
+
+    if (this.isPhaseTaskPlanningIntent(intent)) {
+      const context = promptConfig.content.retryTaskContexts.phaseTasks;
+      return [
+        context[0],
+        `${promptConfig.content.labels.projectName}: ${projectName}`,
+        `${promptConfig.content.labels.milestoneTitle}: ${milestoneTitle}`,
+        `${promptConfig.content.labels.phaseName}: ${phaseName}`,
+        ...context.slice(1),
+      ];
+    }
+
+    if (intent === "enrich_task") {
+      const context = promptConfig.content.retryTaskContexts.enrichment;
+      return [
+        context[0],
+        `${promptConfig.content.labels.projectName}: ${projectName}`,
+        `${promptConfig.content.labels.phaseName}: ${phaseName}`,
+        ...context.slice(1),
+      ];
+    }
+
+    if (intent === "review_milestone") {
+      const context = promptConfig.content.retryTaskContexts.milestoneReview;
+      return [
+        context[0],
+        `${promptConfig.content.labels.projectName}: ${projectName}`,
+        `${promptConfig.content.labels.milestoneTitle}: ${milestoneTitle}`,
+        ...context.slice(1),
+      ];
+    }
+
+    const taskPrompt = this.readTaskPrompt(payloadInputs);
+    const reminder = this.compactTaskReminder(taskPrompt);
+
+    return [
+      ...promptConfig.content.retryTaskContexts.generic,
+      ...(reminder
+        ? ["", `${promptConfig.content.labels.taskReminder}: ${reminder}`]
+        : []),
+    ];
+  }
+
+  private isRetry(input?: PromptRetryInput): input is PromptRetryInput {
     return Boolean(input && input.attemptNumber > 1);
   }
 
@@ -1225,6 +1503,7 @@ ${lines.join("\n")}`;
 
     if (
       input.intent === "plan_project_phases" ||
+      input.intent === "plan_project_update" ||
       input.intent === "plan_phase_tasks" ||
       input.intent === "plan_next_tasks" ||
       input.intent === "review_milestone" ||
@@ -1289,7 +1568,9 @@ ${lines.join("\n")}`;
     const normalizedIntent =
       intent === "plan_phase_tasks" && !(intent in promptConfig.intents)
         ? "plan_milestone_tasks"
-        : intent;
+        : intent === "plan_project_update" && !(intent in promptConfig.intents)
+          ? "plan_project_phases"
+          : intent;
 
     return (
       normalizedIntent in promptConfig.intents ? normalizedIntent : "default"
@@ -1422,6 +1703,26 @@ ${lines.join("\n")}`;
     }
   }
 
+  private readRawUpdateRequest(
+    inputs: Record<string, unknown>,
+  ): string | undefined {
+    const directUpdateRequest =
+      this.readString(inputs.updateRequest) ??
+      this.readString(inputs.userRequest) ??
+      this.readString(inputs.request);
+
+    if (directUpdateRequest) {
+      return this.extractUpdateRequestSection(directUpdateRequest);
+    }
+
+    const promptValue = this.readString(inputs.prompt);
+    if (promptValue) {
+      return this.extractUpdateRequestSection(promptValue);
+    }
+
+    return undefined;
+  }
+
   private readRawProjectRequest(
     inputs: Record<string, unknown>,
   ): string | undefined {
@@ -1445,6 +1746,25 @@ ${lines.join("\n")}`;
 
     if (markerIndex === -1) {
       return trimmed;
+    }
+
+    const afterMarker = trimmed.slice(markerIndex + marker.length);
+    const nextSectionMatch = afterMarker.match(/\n\n[A-Z][A-Za-z ]+:\n/);
+
+    if (!nextSectionMatch || typeof nextSectionMatch.index !== "number") {
+      return afterMarker.trim();
+    }
+
+    return afterMarker.slice(0, nextSectionMatch.index).trim();
+  }
+
+  private extractUpdateRequestSection(value: string): string {
+    const trimmed = value.trim();
+    const marker = "Update request:\n";
+    const markerIndex = trimmed.indexOf(marker);
+
+    if (markerIndex === -1) {
+      return this.extractProjectRequestSection(trimmed);
     }
 
     const afterMarker = trimmed.slice(markerIndex + marker.length);

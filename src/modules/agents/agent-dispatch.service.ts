@@ -4,6 +4,7 @@ import type {
   MilestoneRecord,
   MilestonesServicePort,
 } from "../milestones/milestone.service";
+import type { ProjectsServicePort } from "../projects/project.service";
 import type {
   CreateTaskInput,
   TaskRecord,
@@ -183,6 +184,7 @@ export type AgentDispatchServiceDependencies = {
   tasksService: TasksServicePort;
   jobsService: JobsServicePort;
   milestonesService: MilestonesServicePort;
+  projectsService?: ProjectsServicePort | undefined;
   taskTimeoutMs?: number;
   projectOwnerAgentId?: string;
   projectManagerAgentId?: string;
@@ -195,6 +197,7 @@ export class AgentDispatchService {
   private readonly tasksService: TasksServicePort;
   private readonly jobsService: JobsServicePort;
   private readonly milestonesService: MilestonesServicePort;
+  private readonly projectsService: ProjectsServicePort | undefined;
   private readonly taskTimeoutMs: number;
 
   private readonly projectOwnerAgentId: string;
@@ -207,6 +210,7 @@ export class AgentDispatchService {
     this.tasksService = dependencies.tasksService;
     this.jobsService = dependencies.jobsService;
     this.milestonesService = dependencies.milestonesService;
+    this.projectsService = dependencies.projectsService;
     this.taskTimeoutMs = dependencies.taskTimeoutMs ?? 120_000;
 
     this.projectOwnerAgentId =
@@ -1999,15 +2003,27 @@ export class AgentDispatchService {
     }
 
     if (outcome.decision === "pass") {
+      const completedMilestone = await this.milestonesService.updateMilestone(
+        milestone._id,
+        { status: "completed" },
+      );
+
       input.dispatchLogger.info(
         {
           decision: outcome.decision,
-          milestoneId: milestone._id,
-          milestoneTitle: milestone.title,
+          milestoneId: completedMilestone._id,
+          milestoneTitle: completedMilestone.title,
+          milestoneStatus: completedMilestone.status,
           metAcceptanceCriteria: outcome.metAcceptanceCriteria,
         },
         "Milestone review passed with no patch milestone required.",
       );
+
+      await this.completeJobAndProjectIfLastNonCompletedMilestoneReviewPassed({
+        job: input.job,
+        milestone: completedMilestone,
+        dispatchLogger: input.dispatchLogger,
+      });
       return;
     }
 
@@ -2031,6 +2047,101 @@ export class AgentDispatchService {
       },
       "Milestone review requested a patch milestone and the follow-up work was enqueued.",
     );
+  }
+
+  private async completeJobAndProjectIfLastNonCompletedMilestoneReviewPassed(input: {
+    job: JobRecord;
+    milestone: MilestoneRecord;
+    dispatchLogger: typeof logger;
+  }): Promise<void> {
+    const milestones = await this.milestonesService.listMilestones({
+      projectId: input.job.projectId,
+      limit: 200,
+    });
+
+    const remainingNonCompletedMilestones = milestones.filter((milestone) => {
+      if (milestone._id === input.milestone._id) {
+        return false;
+      }
+
+      return (
+        milestone.status !== "completed" && milestone.status !== "cancelled"
+      );
+    });
+
+    if (remainingNonCompletedMilestones.length > 0) {
+      input.dispatchLogger.debug(
+        {
+          jobId: input.job._id,
+          projectId: input.job.projectId,
+          milestoneId: input.milestone._id,
+          remainingNonCompletedMilestoneCount:
+            remainingNonCompletedMilestones.length,
+          remainingNonCompletedMilestones: remainingNonCompletedMilestones.map(
+            (milestone) => ({
+              milestoneId: milestone._id,
+              title: milestone.title,
+              order: milestone.order,
+              status: milestone.status,
+            }),
+          ),
+        },
+        "Passing milestone review did not complete the job because non-completed project milestones still exist.",
+      );
+      return;
+    }
+
+    const completedState = "COMPLETED" as Parameters<
+      JobsServicePort["advanceState"]
+    >[1];
+    const updatedJob = await this.jobsService.advanceState(
+      input.job._id,
+      completedState,
+    );
+
+    if (!this.projectsService) {
+      input.dispatchLogger.warn(
+        {
+          jobId: updatedJob._id,
+          projectId: updatedJob.projectId,
+          milestoneId: input.milestone._id,
+        },
+        "Job marked completed after the last non-completed milestone review passed, but no projectsService was configured to mark the project ready for review.",
+      );
+      return;
+    }
+
+    try {
+      const readyForReviewStatus = "ready_for_review" as Parameters<
+        ProjectsServicePort["updateProject"]
+      >[1]["status"];
+      const updatedProject = await this.projectsService.updateProject(
+        input.job.projectId,
+        { status: readyForReviewStatus },
+      );
+
+      input.dispatchLogger.info(
+        {
+          jobId: updatedJob._id,
+          jobState: updatedJob.state,
+          projectId: updatedProject._id,
+          projectStatus: updatedProject.status,
+          milestoneId: input.milestone._id,
+          milestoneTitle: input.milestone.title,
+        },
+        "Last non-completed milestone review passed; marked the job completed and the project ready for review.",
+      );
+    } catch (error: unknown) {
+      input.dispatchLogger.warn(
+        {
+          jobId: updatedJob._id,
+          projectId: updatedJob.projectId,
+          milestoneId: input.milestone._id,
+          error,
+        },
+        "Job was marked completed after the last non-completed milestone review passed, but the project could not be marked ready for review.",
+      );
+    }
   }
 
   private async applyEnrichmentToExecutionTask(input: {

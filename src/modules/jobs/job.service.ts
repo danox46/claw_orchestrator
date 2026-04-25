@@ -13,18 +13,20 @@ import JobModel, { type JobModelType } from "./job.model";
 export type CreateJobInput = CreateJobRequest;
 export type UpdateJobInput = UpdateJobRequest;
 
+type JobRecordMetadata = {
+  requestedBy?: string;
+  appType: JobMetadata["appType"];
+  stack: JobMetadata["stack"];
+  deployment: JobMetadata["deployment"];
+} & Record<string, unknown>;
+
 export type JobRecord = {
   _id: string;
   projectId: string;
   type: JobType;
   state: JobState;
   prompt: string;
-  metadata: {
-    requestedBy?: string;
-    appType: JobMetadata["appType"];
-    stack: JobMetadata["stack"];
-    deployment: JobMetadata["deployment"];
-  };
+  metadata: JobRecordMetadata;
   currentTaskId?: string;
   error?: string;
   createdAt: Date;
@@ -68,7 +70,7 @@ type JobDocumentLike = {
     appType: JobMetadata["appType"];
     stack: JobMetadata["stack"];
     deployment: JobMetadata["deployment"];
-  };
+  } & Record<string, unknown>;
   currentTaskId?: Types.ObjectId | null;
   error?: string | null;
   createdAt: Date;
@@ -91,6 +93,28 @@ function toObjectId(value: string, fieldName: string): Types.ObjectId {
   return new Types.ObjectId(value);
 }
 
+function mapJobMetadata(
+  metadata: JobDocumentLike["metadata"],
+): JobRecordMetadata {
+  const { requestedBy, appType, stack, deployment, ...rest } =
+    metadata as JobDocumentLike["metadata"] & Record<string, unknown>;
+
+  return {
+    ...rest,
+    ...(requestedBy ? { requestedBy } : {}),
+    appType,
+    stack: {
+      frontend: stack.frontend,
+      backend: stack.backend,
+      database: stack.database,
+    },
+    deployment: {
+      target: deployment.target,
+      environment: deployment.environment,
+    },
+  };
+}
+
 function mapJob(document: JobDocumentLike): JobRecord {
   return {
     _id: document.id,
@@ -98,27 +122,31 @@ function mapJob(document: JobDocumentLike): JobRecord {
     type: document.type,
     state: document.state,
     prompt: document.prompt,
-    metadata: {
-      ...(document.metadata.requestedBy
-        ? { requestedBy: document.metadata.requestedBy }
-        : {}),
-      appType: document.metadata.appType,
-      stack: {
-        frontend: document.metadata.stack.frontend,
-        backend: document.metadata.stack.backend,
-        database: document.metadata.stack.database,
-      },
-      deployment: {
-        target: document.metadata.deployment.target,
-        environment: document.metadata.deployment.environment,
-      },
-    },
+    metadata: mapJobMetadata(document.metadata),
     ...(document.currentTaskId
       ? { currentTaskId: document.currentTaskId.toString() }
       : {}),
     ...(document.error ? { error: document.error } : {}),
     createdAt: document.createdAt,
     updatedAt: document.updatedAt,
+  };
+}
+
+function normalizeJobMetadata(
+  input: CreateJobInput["metadata"],
+): Record<string, unknown> {
+  const metadata = input as CreateJobInput["metadata"] &
+    Record<string, unknown>;
+  const { requestedBy, appType, stack, deployment, ...rest } = metadata;
+
+  return {
+    ...rest,
+    ...(typeof requestedBy === "string" && requestedBy.trim().length > 0
+      ? { requestedBy: requestedBy.trim() }
+      : {}),
+    appType,
+    stack,
+    deployment,
   };
 }
 
@@ -129,15 +157,7 @@ export class JobService implements JobsServicePort {
       type: input.type,
       state: input.state,
       prompt: input.prompt.trim(),
-      metadata: {
-        ...(typeof input.metadata.requestedBy === "string" &&
-        input.metadata.requestedBy.trim().length > 0
-          ? { requestedBy: input.metadata.requestedBy.trim() }
-          : {}),
-        appType: input.metadata.appType,
-        stack: input.metadata.stack,
-        deployment: input.metadata.deployment,
-      },
+      metadata: normalizeJobMetadata(input.metadata),
       ...(typeof input.currentTaskId === "string"
         ? { currentTaskId: toObjectId(input.currentTaskId, "currentTaskId") }
         : {}),

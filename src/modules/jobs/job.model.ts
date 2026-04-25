@@ -73,6 +73,31 @@ const jobMetadataSchema = new Schema(
       type: jobDeploymentSchema,
       required: true,
     },
+    requestType: {
+      type: String,
+      enum: ["fix", "feature", "patch", "cleanup"],
+      default: undefined,
+      trim: true,
+    },
+    isProjectUpdate: {
+      type: Boolean,
+      default: undefined,
+    },
+    sourceJobId: {
+      type: Types.ObjectId,
+      ref: "Job",
+      default: undefined,
+    },
+    previousSuccessfulJobId: {
+      type: Types.ObjectId,
+      ref: "Job",
+      default: undefined,
+    },
+    canonicalProjectRoot: {
+      type: String,
+      trim: true,
+      default: undefined,
+    },
   },
   {
     _id: false,
@@ -109,6 +134,7 @@ const jobSchema = new Schema(
         "DEPLOYED",
         "FAILED",
         "PLAN_READY",
+        "COMPLETED",
       ],
       required: true,
       index: true,

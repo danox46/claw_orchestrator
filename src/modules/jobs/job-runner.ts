@@ -390,7 +390,7 @@ export class JobRunner {
       return false;
     }
 
-    const activeMilestone =
+    let activeMilestone =
       await this.milestonesService.getCurrentActiveMilestone(job.projectId);
 
     if (!activeMilestone) {
@@ -413,8 +413,17 @@ export class JobRunner {
         "Starting next startable milestone for project.",
       );
 
-      await this.milestonesService.startMilestone(nextMilestone._id);
-      return true;
+      activeMilestone = await this.milestonesService.startMilestone(
+        nextMilestone._id,
+      );
+
+      jobLogger.debug(
+        {
+          milestoneId: activeMilestone._id,
+          milestoneTitle: activeMilestone.title,
+        },
+        "Started milestone and continuing milestone evaluation in the same tick.",
+      );
     }
 
     const summary = await this.summarizeMilestoneTasks({

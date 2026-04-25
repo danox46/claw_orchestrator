@@ -10,10 +10,20 @@ type IntakeValidatedLocals = {
   };
 };
 
+type IntakeCreateInput = Parameters<IntakeServicePort["createIntakeJob"]>[0];
+
+type RawUpdateIntakeFields = {
+  mode?: unknown;
+  projectId?: unknown;
+  requestType?: unknown;
+  request?: unknown;
+  canonicalProjectRoot?: unknown;
+};
+
 export type IntakeController = {
   health: (_req: Request, res: Response) => void;
   create: (
-    _req: Request,
+    req: Request,
     res: Response<any, IntakeValidatedLocals>,
   ) => Promise<void>;
 };
@@ -35,6 +45,29 @@ function requireValidatedBody(
   return body;
 }
 
+function mergeUpdateFields(
+  validatedBody: CreateIntakeRequest,
+  rawBody: unknown,
+): IntakeCreateInput {
+  const raw =
+    rawBody !== null && typeof rawBody === "object"
+      ? (rawBody as RawUpdateIntakeFields)
+      : undefined;
+
+  return {
+    ...validatedBody,
+    ...(typeof raw?.mode === "string" ? { mode: raw.mode } : {}),
+    ...(typeof raw?.projectId === "string" ? { projectId: raw.projectId } : {}),
+    ...(typeof raw?.requestType === "string"
+      ? { requestType: raw.requestType }
+      : {}),
+    ...(typeof raw?.request === "string" ? { request: raw.request } : {}),
+    ...(typeof raw?.canonicalProjectRoot === "string"
+      ? { canonicalProjectRoot: raw.canonicalProjectRoot }
+      : {}),
+  } as IntakeCreateInput;
+}
+
 export function createIntakeController(
   intakeService: IntakeServicePort,
 ): IntakeController {
@@ -50,10 +83,11 @@ export function createIntakeController(
     },
 
     create: async (
-      _req: Request,
+      req: Request,
       res: Response<any, IntakeValidatedLocals>,
     ): Promise<void> => {
-      const input = requireValidatedBody(res);
+      const validatedBody = requireValidatedBody(res);
+      const input = mergeUpdateFields(validatedBody, req.body);
       const result = await intakeService.createIntakeJob(input);
 
       res.status(202).json(

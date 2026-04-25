@@ -189,6 +189,7 @@ const taskSchema = new Schema(
         "plan_next_tasks",
         "review_milestone",
         "enrich_task",
+        "plan_project_update",
       ],
       required: true,
       index: true,

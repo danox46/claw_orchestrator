@@ -24,6 +24,7 @@ export const jobStateSchema = z.enum([
   "DEPLOYED",
   "FAILED",
   "PLAN_READY",
+  "COMPLETED",
 ]);
 
 export const jobMetadataSchema = z.object({
@@ -43,6 +44,16 @@ export const jobMetadataSchema = z.object({
     target: "docker",
     environment: "staging",
   }),
+  requestType: z.enum(["fix", "feature", "patch", "cleanup"]).optional(),
+  isProjectUpdate: z.boolean().optional(),
+  sourceJobId: objectIdSchema.optional(),
+  previousSuccessfulJobId: objectIdSchema.optional(),
+  canonicalProjectRoot: z
+    .string()
+    .trim()
+    .min(1, "canonicalProjectRoot cannot be empty")
+    .max(1000, "canonicalProjectRoot must be at most 1000 characters long")
+    .optional(),
 });
 
 export const jobIdParamsSchema = z.object({

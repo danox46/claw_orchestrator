@@ -344,6 +344,70 @@ function validateRequiredTrimmedString(
   return [];
 }
 
+const VALID_TASK_INTENTS = new Set<string>([
+  "draft_spec",
+  "design_architecture",
+  "generate_scaffold",
+  "implement_feature",
+  "run_tests",
+  "review_security",
+  "prepare_staging",
+  "plan_project_phases",
+  "plan_phase_tasks",
+  "plan_next_tasks",
+  "review_milestone",
+  "enrich_task",
+]);
+
+const VALID_TASK_STATUSES = new Set<string>([
+  "queued",
+  "running",
+  "qa",
+  "succeeded",
+  "failed",
+  "canceled",
+]);
+
+const VALID_TASK_ISSUER_KINDS = new Set<string>(["system", "user", "agent"]);
+
+const VALID_TASK_SANDBOXES = new Set<string>(["off", "non-main", "all"]);
+
+function validateRequiredEnumValue(
+  value: unknown,
+  field: string,
+  code: string,
+  allowedValues: ReadonlySet<string>,
+): TaskInputValidationIssue[] {
+  if (typeof value !== "string" || !allowedValues.has(value)) {
+    return [
+      {
+        code,
+        field,
+        message: `${field} must be one of: ${[...allowedValues].join(", ")}.`,
+        details: {
+          receivedValue: value,
+          allowedValues: [...allowedValues],
+        },
+      },
+    ];
+  }
+
+  return [];
+}
+
+function validateOptionalEnumValue(
+  value: unknown,
+  field: string,
+  code: string,
+  allowedValues: ReadonlySet<string>,
+): TaskInputValidationIssue[] {
+  if (value === undefined) {
+    return [];
+  }
+
+  return validateRequiredEnumValue(value, field, code, allowedValues);
+}
+
 function validateOptionalStringArray(
   value: unknown,
   field: string,
@@ -390,6 +454,30 @@ function getCreateTaskValidationIssues(
   const issues: TaskInputValidationIssue[] = [];
 
   issues.push(
+    ...validateRequiredEnumValue(
+      input.intent,
+      "intent",
+      "TASK_CREATE_INTENT_INVALID",
+      VALID_TASK_INTENTS,
+    ),
+    ...validateOptionalEnumValue(
+      input.status,
+      "status",
+      "TASK_CREATE_STATUS_INVALID",
+      VALID_TASK_STATUSES,
+    ),
+    ...validateRequiredEnumValue(
+      input.issuer?.kind,
+      "issuer.kind",
+      "TASK_CREATE_ISSUER_KIND_INVALID",
+      VALID_TASK_ISSUER_KINDS,
+    ),
+    ...validateRequiredEnumValue(
+      input.constraints?.sandbox,
+      "constraints.sandbox",
+      "TASK_CREATE_SANDBOX_INVALID",
+      VALID_TASK_SANDBOXES,
+    ),
     ...validateRequiredTrimmedString(
       input.jobId,
       "jobId",

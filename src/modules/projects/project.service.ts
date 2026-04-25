@@ -23,7 +23,8 @@ export type ProjectRecord = {
   };
   repoMode: "local" | "github";
   repoUrl?: string;
-  status: "active" | "archived";
+  canonicalProjectRoot?: string;
+  status: "active" | "archived" | "ready_for_review";
   createdAt: Date;
   updatedAt: Date;
 };
@@ -65,6 +66,7 @@ type ProjectDocumentLike = {
   };
   repoMode: RepoMode;
   repoUrl?: string | null;
+  canonicalProjectRoot?: string | null;
   status: ProjectStatus;
   createdAt: Date;
   updatedAt: Date;
@@ -83,6 +85,9 @@ function mapProject(document: ProjectDocumentLike): ProjectRecord {
     },
     repoMode: document.repoMode,
     ...(document.repoUrl ? { repoUrl: document.repoUrl } : {}),
+    ...(document.canonicalProjectRoot
+      ? { canonicalProjectRoot: document.canonicalProjectRoot }
+      : {}),
     status: document.status,
     createdAt: document.createdAt,
     updatedAt: document.updatedAt,
@@ -101,6 +106,7 @@ export class ProjectService implements ProjectsServicePort {
         ...(typeof input.repoUrl === "string" && input.repoUrl.trim().length > 0
           ? { repoUrl: input.repoUrl.trim() }
           : {}),
+        canonicalProjectRoot: input.canonicalProjectRoot.trim(),
       });
 
       return mapProject(created);
@@ -181,6 +187,10 @@ export class ProjectService implements ProjectsServicePort {
 
     if (typeof updates.repoUrl === "string") {
       updatePayload.repoUrl = updates.repoUrl.trim();
+    }
+
+    if (typeof updates.canonicalProjectRoot === "string") {
+      updatePayload.canonicalProjectRoot = updates.canonicalProjectRoot.trim();
     }
 
     if (typeof updates.status === "string") {

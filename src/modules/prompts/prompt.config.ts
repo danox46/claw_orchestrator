@@ -17,11 +17,7 @@ export const promptConfig = {
       "Prefer small, dependency-aware plans over broad, bundled work items.",
       "Keep planning outputs structured and ready for downstream execution.",
     ],
-    retry: [
-      "This prompt includes prior failure context that should affect your next attempt.",
-      "Do not repeat the same failure pattern if the prior attempt already showed it was ineffective.",
-      "Preserve valid partial work when possible instead of restarting broadly.",
-    ],
+    retry: ["Use the validation error below as the main correction target."],
   },
 
   sections: {
@@ -99,6 +95,15 @@ export const promptConfig = {
       "Do not create execution tasks yet.",
       "Keep the phases practical, sequential, and ready for downstream task planning.",
     ],
+    plan_project_update: [
+      "Plan the smallest valid project update for this existing software project.",
+      "This is work on an existing project, not a new project kickoff.",
+      "Preserve existing accepted scope and working behavior unless the new request explicitly changes it.",
+      "Prefer the smallest milestone or phase set that satisfies the update request.",
+      "Do not restart the full project lifecycle and do not re-plan already accepted scope.",
+      "Work inside the provided canonicalProjectRoot and keep the plan grounded in the existing project context.",
+      "Return only milestone or phase planning for the requested update.",
+    ],
     plan_phase_tasks: [
       "Break the milestone into the smallest useful ordered task list.",
       "Avoid combining architecture, scaffolding, implementation, and validation in one task.",
@@ -135,10 +140,7 @@ export const promptConfig = {
   },
 
   retries: {
-    generic: [
-      "This is a retry attempt.",
-      "Use the previous failure context to avoid repeating the same mistake.",
-    ],
+    generic: ["This is a retry attempt."],
     timeout: [
       "Prioritize the core deliverable and avoid unnecessary expansion.",
     ],
@@ -154,11 +156,7 @@ export const promptConfig = {
       "The previous attempt was incomplete.",
       "Finish the required deliverable instead of restarting broadly.",
     ],
-    default: [
-      "Adjust your approach based on the previous failure details.",
-      "Take your time to analyze the error and then resolve it",
-      "Take your time to make sure you're responding with a valid JSON",
-    ],
+    default: ["Correct the validation error below."],
   },
 
   outputReminders: {
@@ -250,6 +248,133 @@ export const promptConfig = {
 ]
 }`,
     ],
+  },
+  content: {
+    defaults: {
+      unnamedProject: "Unnamed Project",
+      unnamedMilestone: "Unnamed Milestone",
+      unnamedPhase: "Unnamed Phase",
+      milestoneReviewTitle: "Milestone Review",
+      missingProjectRequest: "No project request was provided.",
+      missingUpdateRequest: "No update request was provided.",
+      missingRetryFailureMessage:
+        "Retry requested, but no failure message was provided.",
+      unknownStatus: "unknown",
+    },
+    labels: {
+      projectId: "Project id",
+      projectName: "Project name",
+      requestType: "Request type",
+      canonicalProjectRoot: "Canonical project root",
+      appType: "App type",
+      stack: "Stack",
+      deployment: "Deployment",
+      projectRequest: "Project request:",
+      updateRequest: "Update request:",
+      latestAcceptedMilestoneSummary: "Latest accepted milestone summary:",
+      latestReviewOutcome: "Latest review outcome:",
+      milestoneId: "Milestone id",
+      milestoneTitle: "Milestone title",
+      milestoneGoal: "Milestone goal",
+      milestoneDescription: "Milestone description",
+      dependsOnMilestoneId: "Depends on milestone id",
+      milestoneOrder: "Milestone order",
+      milestoneStatus: "Milestone status",
+      projectSummary: "Project summary:",
+      milestoneScope: "Milestone Scope",
+      milestoneAcceptanceCriteria: "Milestone Acceptance Criteria",
+      phaseId: "Phase id",
+      phaseName: "Phase name",
+      phaseGoal: "Phase goal",
+      phaseDescription: "Phase description",
+      phaseDependencies: "Phase dependencies:",
+      phaseDeliverables: "Phase Deliverables",
+      phaseExitCriteria: "Phase Exit Criteria",
+      completedMilestoneTaskCount: "Completed milestone task count",
+      originalProjectBrief: "Original project brief:",
+      taskPrompt: "Task prompt:",
+      taskReminder: "Task reminder",
+      projectPath: "Project path",
+      systemTaskType: "System task type",
+      plannedTaskIntent: "Planned task intent",
+      acceptanceCriteria: "Acceptance Criteria",
+      testingCriteria: "Testing Criteria",
+      constraints: "Constraints",
+      failureType: "Failure type",
+      failureMessage: "Failure message",
+      previousSummary: "Previous summary",
+      previousArtifacts: "Previous artifacts",
+      priorError: "Prior error",
+      outputKeys: "Output keys",
+      milestoneEvidenceSummary: "Milestone Evidence Summary",
+      sourceTask: "Source Task",
+      taskPlan: "Task Plan",
+      dependencyTaskContext: "Dependency Task Context",
+      milestoneTaskGraph: "Milestone Task Graph",
+      enrichmentContext: "Enrichment Context",
+      relatedEnrichmentTask: "Related Enrichment Task",
+    },
+    retryTaskContexts: {
+      generic: [
+        "Continue the same assigned task in this session.",
+        "Use the existing session context for the full task details and any prior work.",
+        "Focus on correcting the specific failure below instead of restarting from scratch.",
+      ],
+      projectPhases: [
+        "Continue the same phase-planning task in this session.",
+        "Use the existing session context for the full project brief and prior work.",
+        "Focus on correcting the specific failure below instead of rebuilding the full plan from scratch.",
+      ],
+      projectUpdate: [
+        "Continue the same project-update planning task in this session.",
+        "Use the existing session context for the accepted baseline and prior update-planning work.",
+        "Focus on correcting the specific failure below instead of rebuilding the full project lifecycle plan from scratch.",
+      ],
+      phaseTasks: [
+        "Continue the same phase-task planning task in this session.",
+        "Use the existing session context for the full milestone and phase details.",
+        "Focus on correcting the specific failure below instead of rebuilding the entire task plan from scratch.",
+      ],
+      enrichment: [
+        "Continue the same task-enrichment work in this session.",
+        "Use the existing session context, the source task, and the full task plan to improve this one task only.",
+        "Focus on correcting the specific failure below without changing the approved plan.",
+      ],
+      milestoneReview: [
+        "Continue the same milestone review in this session.",
+        "Use the existing session context for detailed evidence and prior checks.",
+        "Focus on producing a clean pass-or-patch decision grounded in the milestone acceptance criteria.",
+      ],
+    },
+    taskContextLines: {
+      enrichSourceTask:
+        "Enrich exactly this task without changing the approved plan:",
+      sameSessionReuse:
+        "This is the same task in the same session. Reuse the existing session context instead of restarting the full task.",
+      previousOutputsRemain:
+        "Previous outputs were returned already and remain in session context.",
+    },
+    milestoneReview: {
+      instructions: [
+        "Review only the stated milestone scope and acceptance criteria.",
+        "Decide whether the milestone passes as-is or needs a patch milestone.",
+        "Do not expand the scope.",
+        "If a patch is needed, define only the smallest valid follow-up milestone required to satisfy the current milestone acceptance criteria.",
+        "Base the decision on the milestone evidence summary below and the milestone acceptance criteria.",
+      ],
+      allowedDecisionPrefix: "Allowed decisions",
+      noEvidence:
+        "No milestone execution evidence was provided. Base the review on the stated scope and acceptance criteria, and explain any uncertainty clearly.",
+      outputGuidance: [
+        'Use this exact response envelope: {"taskId":"<task-id>","status":"succeeded|failed","summary":"","outputs":{"decision":"pass|patch","summary":"","metAcceptanceCriteria":[],"missingOrBrokenItems":[],"patchMilestone":{"title":"","goal":"","description":"","scope":[],"acceptanceCriteria":[]}},"artifacts":[],"errors":[]}',
+        'Set outputs.decision to either "pass" or "patch".',
+        "Ground the decision in the milestone scope, acceptance criteria, and the evidence summary above.",
+        "If the milestone passes, briefly explain which acceptance criteria were met.",
+        "If a patch is needed, include outputs.patchMilestone with only the smallest valid follow-up milestone needed to satisfy the current milestone.",
+        "outputs.patchMilestone must include: title (string), goal (string), description (string), scope (string[]), acceptanceCriteria (string[]).",
+        'Recommended outputs shape: {"decision":"pass|patch","summary":"","metAcceptanceCriteria":[],"missingOrBrokenItems":[],"patchMilestone":{"title":"","goal":"","description":"","scope":[],"acceptanceCriteria":[]}}',
+      ],
+    },
   },
 } as const;
 

@@ -78,9 +78,15 @@ const projectSchema = new Schema(
       default: undefined,
     },
 
+    canonicalProjectRoot: {
+      type: String,
+      trim: true,
+      default: undefined,
+    },
+
     status: {
       type: String,
-      enum: ["active", "archived"],
+      enum: ["active", "archived", "ready_for_review"],
       required: true,
       default: "active",
       index: true,

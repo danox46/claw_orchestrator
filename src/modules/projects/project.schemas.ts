@@ -1,7 +1,11 @@
 import { z } from "zod";
 import { appTypeSchema, stackSchema } from "../intake/intake.schemas";
 
-export const projectStatusSchema = z.enum(["active", "archived"]);
+export const projectStatusSchema = z.enum([
+  "active",
+  "archived",
+  "ready_for_review",
+]);
 
 export const repoModeSchema = z.enum(["local", "github"]);
 
@@ -55,6 +59,12 @@ export const createProjectSchema = z.object({
     .min(1, "repoUrl cannot be empty")
     .max(500, "repoUrl must be at most 500 characters long")
     .optional(),
+
+  canonicalProjectRoot: z
+    .string()
+    .trim()
+    .min(1, "canonicalProjectRoot cannot be empty")
+    .max(1000, "canonicalProjectRoot must be at most 1000 characters long"),
 });
 
 export const updateProjectSchema = z
@@ -73,6 +83,13 @@ export const updateProjectSchema = z
       .trim()
       .min(1, "repoUrl cannot be empty")
       .max(500, "repoUrl must be at most 500 characters long")
+      .optional(),
+
+    canonicalProjectRoot: z
+      .string()
+      .trim()
+      .min(1, "canonicalProjectRoot cannot be empty")
+      .max(1000, "canonicalProjectRoot must be at most 1000 characters long")
       .optional(),
 
     status: projectStatusSchema.optional(),
