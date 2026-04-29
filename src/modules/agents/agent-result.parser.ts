@@ -25,14 +25,14 @@ function createServiceError(input: {
   });
 }
 
-type ParsedAgentResult = TaskResult & {
+export type ParsedAgentResult = TaskResult & {
   openclawTaskId?: string;
   sessionId?: string;
   agentId?: string;
   raw: unknown;
 };
 
-type ParseAgentResultInput = {
+export type ParseAgentResultInput = {
   raw: unknown;
   fallbackTaskId?: string;
   fallbackStatus?: TaskResult["status"];
@@ -107,7 +107,7 @@ export class AgentResultParser {
       "openclawTaskId",
       "remoteTaskId",
     ]);
-    const sessionId = this.readString(rawRecord, ["sessionId"]);
+    const sessionId = this.readString(rawRecord, ["sessionId", "sessionName"]);
     const agentId = this.readString(rawRecord, ["agentId"]);
 
     return {
@@ -120,39 +120,40 @@ export class AgentResultParser {
   }
 
   private unwrapToRecord(value: unknown): Record<string, unknown> {
-    if (this.isRecord(value)) {
-      if (this.isRecord(value.payload)) {
-        return {
-          ...value,
-          ...value.payload,
-        };
-      }
+    const parsedValue = this.coerceToRecord(value);
 
-      if (this.isRecord(value.result)) {
-        return {
-          ...value,
-          ...value.result,
-        };
-      }
-
-      if (this.isRecord(value.data)) {
-        return {
-          ...value,
-          ...value.data,
-        };
-      }
-
-      return value;
+    if (!parsedValue) {
+      throw createServiceError({
+        message: "Agent result payload must be an object.",
+        code: "AGENT_RESULT_NOT_AN_OBJECT",
+        statusCode: 502,
+        details: {
+          rawType: typeof value,
+        },
+      });
     }
 
-    throw createServiceError({
-      message: "Agent result payload must be an object.",
-      code: "AGENT_RESULT_NOT_AN_OBJECT",
-      statusCode: 502,
-      details: {
-        rawType: typeof value,
-      },
-    });
+    const outputTextRecord = this.readJsonRecordString(parsedValue.output_text);
+
+    if (outputTextRecord) {
+      return {
+        ...parsedValue,
+        ...outputTextRecord,
+      };
+    }
+
+    for (const key of ["payload", "result", "data", "raw"] as const) {
+      const nested = this.coerceToRecord(parsedValue[key]);
+
+      if (nested) {
+        return {
+          ...parsedValue,
+          ...nested,
+        };
+      }
+    }
+
+    return parsedValue;
   }
 
   private readSummary(source: Record<string, unknown>): string | undefined {
@@ -182,16 +183,12 @@ export class AgentResultParser {
       return directOutputs;
     }
 
-    const dataOutputs = this.readRecord(source, ["data"]);
+    for (const key of ["data", "result", "output"] as const) {
+      const candidate = this.readRecord(source, [key]);
 
-    if (dataOutputs) {
-      return dataOutputs;
-    }
-
-    const resultOutputs = this.readRecord(source, ["result"]);
-
-    if (resultOutputs) {
-      return resultOutputs;
+      if (candidate && !this.looksLikeAgentEnvelope(candidate)) {
+        return candidate;
+      }
     }
 
     return undefined;
@@ -206,7 +203,13 @@ export class AgentResultParser {
     ];
 
     for (const candidate of candidates) {
-      const artifacts = this.normalizeStringArray(candidate);
+      const artifacts = this.normalizeStringArray(candidate, [
+        "path",
+        "name",
+        "url",
+        "id",
+        "artifact",
+      ]);
 
       if (artifacts.length > 0) {
         return artifacts;
@@ -217,14 +220,25 @@ export class AgentResultParser {
   }
 
   private readErrors(source: Record<string, unknown>): string[] {
-    const explicitErrors = this.normalizeStringArray(source.errors);
+    const explicitErrors = this.normalizeStringArray(source.errors, [
+      "message",
+      "error",
+      "code",
+      "reason",
+      "details",
+    ]);
 
     if (explicitErrors.length > 0) {
       return explicitErrors;
     }
 
     if (this.isRecord(source.error)) {
-      const message = this.readString(source.error, ["message"]);
+      const message = this.readString(source.error, [
+        "message",
+        "error",
+        "code",
+        "reason",
+      ]);
 
       if (message) {
         return [message];
@@ -257,6 +271,7 @@ export class AgentResultParser {
     if (
       value === "queued" ||
       value === "running" ||
+      value === "qa" ||
       value === "succeeded" ||
       value === "failed" ||
       value === "canceled"
@@ -292,10 +307,8 @@ export class AgentResultParser {
         return errors[0] ?? "Task failed.";
       case "canceled":
         return errors[0] ?? "Task was canceled.";
-      default: {
-        const exhaustiveCheck: never = status;
-        return String(exhaustiveCheck);
-      }
+      default:
+        return String(status);
     }
   }
 
@@ -329,7 +342,7 @@ export class AgentResultParser {
     return undefined;
   }
 
-  private normalizeStringArray(value: unknown): string[] {
+  private normalizeStringArray(value: unknown, objectKeys: string[]): string[] {
     if (!Array.isArray(value)) {
       return [];
     }
@@ -343,13 +356,7 @@ export class AgentResultParser {
       }
 
       if (this.isRecord(item)) {
-        const mapped = this.readString(item, [
-          "path",
-          "name",
-          "url",
-          "id",
-          "artifact",
-        ]);
+        const mapped = this.readString(item, objectKeys);
 
         if (mapped) {
           normalized.push(mapped);
@@ -358,6 +365,76 @@ export class AgentResultParser {
     }
 
     return normalized;
+  }
+
+  private coerceToRecord(value: unknown): Record<string, unknown> | undefined {
+    if (this.isRecord(value)) {
+      return value;
+    }
+
+    return this.readJsonRecordString(value);
+  }
+
+  private readJsonRecordString(
+    value: unknown,
+  ): Record<string, unknown> | undefined {
+    if (typeof value !== "string") {
+      return undefined;
+    }
+
+    const trimmed = value.trim();
+
+    if (trimmed.length === 0) {
+      return undefined;
+    }
+
+    const jsonText = this.extractJsonObjectText(trimmed);
+
+    if (!jsonText) {
+      return undefined;
+    }
+
+    try {
+      const parsed = JSON.parse(jsonText) as unknown;
+      return this.isRecord(parsed) ? parsed : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private extractJsonObjectText(value: string): string | undefined {
+    const unfenced = value
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/\s*```$/i, "")
+      .trim();
+
+    if (unfenced.startsWith("{") && unfenced.endsWith("}")) {
+      return unfenced;
+    }
+
+    const start = unfenced.indexOf("{");
+    const end = unfenced.lastIndexOf("}");
+
+    if (start >= 0 && end > start) {
+      return unfenced.slice(start, end + 1);
+    }
+
+    return undefined;
+  }
+
+  private looksLikeAgentEnvelope(value: Record<string, unknown>): boolean {
+    return [
+      "taskId",
+      "orchestratorTaskId",
+      "clientTaskId",
+      "status",
+      "state",
+      "resultStatus",
+      "summary",
+      "errors",
+      "artifacts",
+      "outputs",
+    ].some((key) => key in value);
   }
 
   private isRecord(value: unknown): value is Record<string, unknown> {

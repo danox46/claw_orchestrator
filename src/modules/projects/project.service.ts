@@ -1,4 +1,4 @@
-import { type QueryFilter } from "mongoose";
+import { type QueryFilter, Types } from "mongoose";
 import { ConflictError } from "../../shared/errors/conflict-error";
 import { NotFoundError } from "../../shared/errors/not-found-error";
 import type {
@@ -127,7 +127,20 @@ export class ProjectService implements ProjectsServicePort {
   }
 
   async getProjectById(projectId: string): Promise<ProjectRecord | null> {
-    const project = await ProjectModel.findById(projectId).exec();
+    const normalizedProjectId = projectId.trim();
+
+    if (
+      !Types.ObjectId.isValid(normalizedProjectId) ||
+      new Types.ObjectId(normalizedProjectId).toHexString() !==
+        normalizedProjectId
+    ) {
+      return null;
+    }
+
+    const objectId = new Types.ObjectId(normalizedProjectId);
+
+    const project = await ProjectModel.findOne({ _id: objectId }).exec();
+
     return project ? mapProject(project) : null;
   }
 

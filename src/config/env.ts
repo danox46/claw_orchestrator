@@ -183,7 +183,7 @@ export const env = {
       defaultValue: "0.0.0.0",
     }),
     port: readNumber("PORT", {
-      defaultValue: 3000,
+      defaultValue: 3654,
       min: 1,
       max: 65535,
     }),

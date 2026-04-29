@@ -1,145 +1,91 @@
-import { promptConfig, type PromptGlobalLayerKey } from "./prompt.config";
+import { promptConfig } from "./prompt.config";
+import {
+  buildMinimalPayloadRetryPrompt,
+  buildRetryBlock,
+  buildRetryInput,
+  formatPromptValue,
+  getAgentRules,
+  getIntentRules,
+  getOutputReminder,
+  isPhaseTaskPlanningIntent,
+  isRetry,
+  joinSections,
+  normalizeConstraints,
+  normalizePayloadInputs,
+  optionalLine,
+  readEnrichmentPayload,
+  readMilestoneReviewProjectBrief,
+  readNumber,
+  readPromptValue,
+  readRawProjectRequest,
+  readRawUpdateRequest,
+  readRecord,
+  readRecordArray,
+  readString,
+  readStringArray,
+  readTaskPrompt,
+  renderDependencyTaskContext,
+  renderGlobalLayers,
+  renderList,
+  renderMilestoneExecutionEvidence,
+  renderMilestoneReviewOutputGuidance,
+  renderMilestoneTaskGraphSection,
+  renderOutputGuidance,
+  renderRawSection,
+  renderRequirements,
+  renderRetryTaskContext,
+  renderSourceTask,
+  renderTaskContext,
+  renderTaskPlan,
+  resolveAgentKey,
+  resolveIntentKey,
+  resolvePhaseTaskPlanningIntentKey,
+  resolveProjectUpdatePlanningIntentKey,
+  shouldUseMilestoneReviewPrompt,
+  shouldUseMilestoneTaskPlanningPrompt,
+  shouldUseProjectPhasePlanningPrompt,
+  shouldUseProjectUpdatePlanningPrompt,
+  stringifyValue,
+} from "./prompt.helpers";
+import type {
+  MilestoneTaskPlanningPromptInput,
+  OpenClawPromptBuildInput,
+  PromptBuildInput,
+  PromptRetryInput,
+  ProjectPhasePlanningPromptInput,
+  ProjectUpdatePlanningPromptInput,
+} from "./prompt.types";
 
-export type PromptRetryInput = {
-  attemptNumber: number;
-  failureType?: string;
-  failureMessage?: string;
-  previousSummary?: string;
-  previousOutputs?: Record<string, unknown>;
-  previousArtifacts?: string[];
-  previousErrors?: string[];
-};
+const promptContent = promptConfig.content;
+const promptDefaults = promptContent.defaults;
+const promptLabels = promptContent.labels;
+const retryTaskContexts = promptContent.retryTaskContexts;
+const milestoneReviewCopy = promptContent.milestoneReview;
 
-export type PromptBuildInput = {
-  agentId: string;
-  intent?: string;
-  taskPrompt: string;
-  acceptanceCriteria?: string[];
-  testingCriteria?: string[];
-  constraints?: string[];
-  projectPath?: string;
-  retry?: PromptRetryInput;
-  systemTaskType?: string;
-  phaseName?: string;
-  phaseGoal?: string;
-  plannedTaskIntent?: string;
-  taskPlan?: Record<string, unknown>[];
-  milestoneTaskGraph?: Record<string, unknown>;
-  dependencyTaskContext?: Record<string, unknown>[];
-  sourceTask?: Record<string, unknown>;
-  enrichment?: Record<string, unknown>;
-  enrichmentTask?: Record<string, unknown>;
-};
-
-export type PromptContextValue =
-  | string
-  | number
-  | boolean
-  | null
-  | Record<string, unknown>
-  | unknown[];
-
-export type ProjectPhasePlanningPromptInput = {
-  projectName: string;
-  userPrompt: string;
-  appType?: PromptContextValue;
-  stack?: PromptContextValue;
-  deployment?: PromptContextValue;
-};
-
-export type ProjectUpdatePlanningPromptInput = {
-  projectId?: string;
-  projectName: string;
-  userRequest: string;
-  requestType?: string;
-  canonicalProjectRoot?: string;
-  appType?: PromptContextValue;
-  stack?: PromptContextValue;
-  deployment?: PromptContextValue;
-  latestAcceptedMilestoneSummary?: string;
-  latestReviewOutcome?: string;
-};
-
-export type MilestoneTaskPlanningPromptInput = {
-  projectName: string;
-  milestoneId?: string;
-  milestoneTitle?: string;
-  milestoneGoal?: string;
-  milestoneDescription?: string;
-  milestoneScope?: string[];
-  milestoneAcceptanceCriteria?: string[];
-  projectSummary?: string;
-  userPrompt?: string;
-  title?: string;
-  description?: string;
-  goal?: string;
-  scope?: string[];
-  acceptanceCriteria?: string[];
-  dependsOnMilestoneId?: string;
-  order?: number;
-  status?: string;
-};
-
-export type OpenClawTaskPayloadLike = {
-  projectId: string;
-  jobId: string;
-  milestoneId: string;
-  taskId: string;
-  intent: string;
-  inputs: Record<string, unknown>;
-  constraints?: {
-    toolProfile?: string;
-    sandbox?: "off" | "non-main" | "all";
-    maxTokens?: number;
-    maxCost?: number;
-  };
-  requiredArtifacts?: string[];
-  acceptanceCriteria?: string[];
-  idempotencyKey?: string;
-  attemptNumber?: number;
-  maxAttempts?: number;
-  errors?: string[];
-  lastError?: string;
-  outputs?: Record<string, unknown>;
-  artifacts?: string[];
-};
-
-export type OpenClawPromptBuildInput = {
-  agentId: string;
-  payload: OpenClawTaskPayloadLike;
-};
-
-type PromptAgentKey = keyof typeof promptConfig.agents;
-type PromptIntentKey = keyof typeof promptConfig.intents;
-type PromptRetryKey = keyof typeof promptConfig.retries;
-type OutputReminderKey = keyof typeof promptConfig.outputReminders;
+function renderLabeledValue(label: string, value: string | number): string {
+  return `${label}: ${String(value)}`;
+}
 
 export class PromptService {
   buildTaskPrompt(input: PromptBuildInput): string {
-    const agentKey = this.resolveAgentKey(input.agentId);
-    const intentKey = this.resolveIntentKey(input.intent);
+    const agentKey = resolveAgentKey(input.agentId);
+    const intentKey = resolveIntentKey(input.intent);
 
-    if (this.isRetry(input.retry)) {
-      return this.joinSections([
-        this.renderRetryTaskContext(input),
-        this.buildRetryBlock(input.retry),
+    if (isRetry(input.retry)) {
+      return joinSections([
+        renderRetryTaskContext(input),
+        buildRetryBlock(input.retry),
       ]);
     }
 
-    return this.joinSections([
-      this.renderGlobalLayers("session", "execution"),
-      this.renderList(
-        promptConfig.sections.role,
-        this.getAgentRules(agentKey).role,
-      ),
-      this.renderList(
-        promptConfig.sections.intent,
-        this.getIntentRules(intentKey),
-      ),
-      this.renderTaskContext(input),
-      this.buildRetryBlock(input.retry),
-      this.renderRequirements(input),
-      this.renderOutputGuidance(agentKey),
+    return joinSections([
+      renderGlobalLayers("session", "execution"),
+      renderList(promptConfig.sections.role, getAgentRules(agentKey).role),
+      renderList(promptConfig.sections.intent, getIntentRules(intentKey)),
+      renderTaskContext(input),
+      buildRetryBlock(input.retry),
+      renderRequirements(input),
+      renderOutputGuidance(agentKey),
     ]);
   }
 
@@ -147,32 +93,32 @@ export class PromptService {
     input: ProjectPhasePlanningPromptInput,
   ): string {
     const details = [
-      `Project name: ${input.projectName}`,
-      ...this.optionalLine("App type", this.formatPromptValue(input.appType)),
-      ...this.optionalLine("Stack", this.formatPromptValue(input.stack)),
-      ...this.optionalLine(
-        "Deployment",
-        this.formatPromptValue(input.deployment),
+      renderLabeledValue(promptLabels.projectName, input.projectName),
+      ...optionalLine(promptLabels.appType, formatPromptValue(input.appType)),
+      ...optionalLine(promptLabels.stack, formatPromptValue(input.stack)),
+      ...optionalLine(
+        promptLabels.deployment,
+        formatPromptValue(input.deployment),
       ),
       "",
-      "Project request:",
+      promptLabels.projectRequest,
       input.userPrompt,
     ];
 
-    return this.joinSections([
-      this.renderGlobalLayers("session", "planning"),
-      this.renderList(
+    return joinSections([
+      renderGlobalLayers("session", "planning"),
+      renderList(
         promptConfig.sections.role,
-        this.getAgentRules("product_owner").role,
+        getAgentRules("product_owner").role,
       ),
-      this.renderList(
+      renderList(
         promptConfig.sections.intent,
-        this.getIntentRules("plan_project_phases"),
+        getIntentRules("plan_project_phases"),
       ),
-      this.renderRawSection(promptConfig.sections.task, details),
-      this.renderList(
+      renderRawSection(promptConfig.sections.task, details),
+      renderList(
         promptConfig.sections.output,
-        this.getOutputReminder("project_owner"),
+        getOutputReminder("project_owner"),
       ),
     ]);
   }
@@ -181,48 +127,48 @@ export class PromptService {
     input: ProjectUpdatePlanningPromptInput,
   ): string {
     const details = [
-      ...this.optionalLine("Project id", input.projectId),
-      `Project name: ${input.projectName}`,
-      ...this.optionalLine("Request type", input.requestType),
-      ...this.optionalLine(
-        "Canonical project root",
+      ...optionalLine(promptLabels.projectId, input.projectId),
+      renderLabeledValue(promptLabels.projectName, input.projectName),
+      ...optionalLine(promptLabels.requestType, input.requestType),
+      ...optionalLine(
+        promptLabels.canonicalProjectRoot,
         input.canonicalProjectRoot,
       ),
-      ...this.optionalLine("App type", this.formatPromptValue(input.appType)),
-      ...this.optionalLine("Stack", this.formatPromptValue(input.stack)),
-      ...this.optionalLine(
-        "Deployment",
-        this.formatPromptValue(input.deployment),
+      ...optionalLine(promptLabels.appType, formatPromptValue(input.appType)),
+      ...optionalLine(promptLabels.stack, formatPromptValue(input.stack)),
+      ...optionalLine(
+        promptLabels.deployment,
+        formatPromptValue(input.deployment),
       ),
       ...(input.latestAcceptedMilestoneSummary
         ? [
             "",
-            "Latest accepted milestone summary:",
+            promptLabels.latestAcceptedMilestoneSummary,
             input.latestAcceptedMilestoneSummary,
           ]
         : []),
       ...(input.latestReviewOutcome
-        ? ["", "Latest review outcome:", input.latestReviewOutcome]
+        ? ["", promptLabels.latestReviewOutcome, input.latestReviewOutcome]
         : []),
       "",
-      "Update request:",
+      promptLabels.updateRequest,
       input.userRequest,
     ];
 
-    return this.joinSections([
-      this.renderGlobalLayers("session", "planning"),
-      this.renderList(
+    return joinSections([
+      renderGlobalLayers("session", "planning"),
+      renderList(
         promptConfig.sections.role,
-        this.getAgentRules("product_owner").role,
+        getAgentRules("product_owner").role,
       ),
-      this.renderList(
+      renderList(
         promptConfig.sections.intent,
-        this.getIntentRules(this.resolveProjectUpdatePlanningIntentKey()),
+        getIntentRules(resolveProjectUpdatePlanningIntentKey()),
       ),
-      this.renderRawSection(promptConfig.sections.task, details),
-      this.renderList(
+      renderRawSection(promptConfig.sections.task, details),
+      renderList(
         promptConfig.sections.output,
-        this.getOutputReminder("project_owner"),
+        getOutputReminder("project_owner"),
       ),
     ]);
   }
@@ -231,7 +177,7 @@ export class PromptService {
     input: MilestoneTaskPlanningPromptInput,
   ): string {
     const milestoneTitle =
-      input.milestoneTitle ?? input.title ?? "Unnamed Milestone";
+      input.milestoneTitle ?? input.title ?? promptDefaults.unnamedMilestone;
     const milestoneGoal = input.milestoneGoal ?? input.goal;
     const milestoneDescription =
       input.milestoneDescription ?? input.description;
@@ -246,44 +192,41 @@ export class PromptService {
         : input.acceptanceCriteria;
 
     const details = [
-      `Project name: ${input.projectName}`,
-      ...this.optionalLine("Milestone id", input.milestoneId),
-      `Milestone title: ${milestoneTitle}`,
-      ...this.optionalLine("Milestone goal", milestoneGoal),
-      ...this.optionalLine("Milestone description", milestoneDescription),
-      ...this.optionalLine(
-        "Depends on milestone id",
+      renderLabeledValue(promptLabels.projectName, input.projectName),
+      ...optionalLine(promptLabels.milestoneId, input.milestoneId),
+      renderLabeledValue(promptLabels.milestoneTitle, milestoneTitle),
+      ...optionalLine(promptLabels.milestoneGoal, milestoneGoal),
+      ...optionalLine(promptLabels.milestoneDescription, milestoneDescription),
+      ...optionalLine(
+        promptLabels.dependsOnMilestoneId,
         input.dependsOnMilestoneId,
       ),
       ...(typeof input.order === "number"
-        ? [`Milestone order: ${String(input.order)}`]
+        ? [renderLabeledValue(promptLabels.milestoneOrder, input.order)]
         : []),
-      ...this.optionalLine("Milestone status", input.status),
+      ...optionalLine(promptLabels.milestoneStatus, input.status),
       ...(input.projectSummary
-        ? ["", "Project summary:", input.projectSummary]
+        ? ["", promptLabels.projectSummary, input.projectSummary]
         : []),
     ];
 
-    return this.joinSections([
-      this.renderGlobalLayers("session", "planning"),
-      this.renderList(
+    return joinSections([
+      renderGlobalLayers("session", "planning"),
+      renderList(
         promptConfig.sections.role,
-        this.getAgentRules("project_manager").role,
+        getAgentRules("project_manager").role,
       ),
-      this.renderList(
+      renderList(
         promptConfig.sections.intent,
-        this.getIntentRules("plan_phase_tasks"),
+        getIntentRules("plan_phase_tasks"),
       ),
-      this.renderRawSection(promptConfig.sections.task, details),
-      this.renderList("Milestone Scope", milestoneScope),
-      this.renderList(
-        "Milestone Acceptance Criteria",
+      renderRawSection(promptConfig.sections.task, details),
+      renderList(promptLabels.milestoneScope, milestoneScope),
+      renderList(
+        promptLabels.milestoneAcceptanceCriteria,
         milestoneAcceptanceCriteria,
       ),
-      this.renderList(
-        promptConfig.sections.output,
-        this.getOutputReminder("planner"),
-      ),
+      renderList(promptConfig.sections.output, getOutputReminder("planner")),
     ]);
   }
 
@@ -294,7 +237,7 @@ export class PromptService {
   }
 
   buildResponsesPrompt(input: OpenClawPromptBuildInput): string {
-    const normalizedInputs = this.normalizePayloadInputs(input.payload.inputs);
+    const normalizedInputs = normalizePayloadInputs(input.payload.inputs);
     const normalizedPayload =
       normalizedInputs === input.payload.inputs
         ? input.payload
@@ -304,20 +247,18 @@ export class PromptService {
         ? input
         : { ...input, payload: normalizedPayload };
 
-    const constraints = this.normalizeConstraints(
-      normalizedPayload.constraints,
-    );
-    const retry = this.buildRetryInput(normalizedPayload);
-    const explicitIntent = this.readString(normalizedPayload.intent);
+    const constraints = normalizeConstraints(normalizedPayload.constraints);
+    const retry = buildRetryInput(normalizedPayload);
+    const explicitIntent = readString(normalizedPayload.intent);
 
-    if (this.isRetry(retry)) {
-      return this.buildMinimalPayloadRetryPrompt(normalizedInput, retry);
+    if (isRetry(retry)) {
+      return buildMinimalPayloadRetryPrompt(normalizedInput, retry);
     }
 
     const isProjectUpdatePlanning =
       explicitIntent === "plan_project_update" ||
       ((explicitIntent === "plan_project_phases" || !explicitIntent) &&
-        this.shouldUseProjectUpdatePlanningPrompt(normalizedPayload.inputs));
+        shouldUseProjectUpdatePlanningPrompt(normalizedPayload.inputs));
 
     if (isProjectUpdatePlanning) {
       return this.buildProjectUpdatePlanningPromptFromPayload(
@@ -335,7 +276,7 @@ export class PromptService {
       );
     }
 
-    if (this.isPhaseTaskPlanningIntent(explicitIntent)) {
+    if (isPhaseTaskPlanningIntent(explicitIntent)) {
       return this.buildMilestoneTaskPlanningPromptFromPayload(
         normalizedInput,
         constraints,
@@ -360,7 +301,7 @@ export class PromptService {
     }
 
     if (!explicitIntent) {
-      if (this.shouldUseProjectPhasePlanningPrompt(normalizedPayload.inputs)) {
+      if (shouldUseProjectPhasePlanningPrompt(normalizedPayload.inputs)) {
         return this.buildProjectPhasePlanningPromptFromPayload(
           normalizedInput,
           constraints,
@@ -368,7 +309,7 @@ export class PromptService {
         );
       }
 
-      if (this.shouldUseMilestoneTaskPlanningPrompt(normalizedPayload.inputs)) {
+      if (shouldUseMilestoneTaskPlanningPrompt(normalizedPayload.inputs)) {
         return this.buildMilestoneTaskPlanningPromptFromPayload(
           normalizedInput,
           constraints,
@@ -376,7 +317,7 @@ export class PromptService {
         );
       }
 
-      if (this.shouldUseMilestoneReviewPrompt(normalizedPayload.inputs)) {
+      if (shouldUseMilestoneReviewPrompt(normalizedPayload.inputs)) {
         return this.buildMilestoneReviewPromptFromPayload(
           normalizedInput,
           constraints,
@@ -385,8 +326,7 @@ export class PromptService {
       }
 
       if (
-        this.readString(normalizedPayload.inputs.systemTaskType) ===
-        "enrichment"
+        readString(normalizedPayload.inputs.systemTaskType) === "enrichment"
       ) {
         return this.buildTaskEnrichmentPromptFromPayload(
           normalizedInput,
@@ -396,37 +336,33 @@ export class PromptService {
       }
     }
 
-    const taskPrompt = this.readTaskPrompt(normalizedPayload.inputs);
+    const taskPrompt = readTaskPrompt(normalizedPayload.inputs);
     const payloadAcceptanceCriteria =
       normalizedPayload.acceptanceCriteria &&
       normalizedPayload.acceptanceCriteria.length > 0
         ? normalizedPayload.acceptanceCriteria
-        : this.readStringArray(normalizedPayload.inputs.acceptanceCriteria);
-    const payloadTestingCriteria = this.readStringArray(
+        : readStringArray(normalizedPayload.inputs.acceptanceCriteria);
+    const payloadTestingCriteria = readStringArray(
       normalizedPayload.inputs.testingCriteria,
     );
-    const systemTaskType = this.readString(
-      normalizedPayload.inputs.systemTaskType,
-    );
-    const phaseName = this.readString(normalizedPayload.inputs.phaseName);
-    const phaseGoal = this.readString(normalizedPayload.inputs.phaseGoal);
-    const plannedTaskIntent = this.readString(
+    const systemTaskType = readString(normalizedPayload.inputs.systemTaskType);
+    const phaseName = readString(normalizedPayload.inputs.phaseName);
+    const phaseGoal = readString(normalizedPayload.inputs.phaseGoal);
+    const plannedTaskIntent = readString(
       normalizedPayload.inputs.plannedTaskIntent,
     );
-    const taskPlan = this.readRecordArray(normalizedPayload.inputs.taskPlan);
-    const milestoneTaskGraph = this.readRecord(
+    const taskPlan = readRecordArray(normalizedPayload.inputs.taskPlan);
+    const milestoneTaskGraph = readRecord(
       normalizedPayload.inputs.milestoneTaskGraph,
     );
-    const dependencyTaskContext = this.readRecordArray(
+    const dependencyTaskContext = readRecordArray(
       normalizedPayload.inputs.dependencyTaskContext,
     );
-    const sourceTask = this.readRecord(normalizedPayload.inputs.sourceTask);
-    const enrichment = this.readEnrichmentPayload(
+    const sourceTask = readRecord(normalizedPayload.inputs.sourceTask);
+    const enrichment = readEnrichmentPayload(
       normalizedPayload.inputs.enrichment,
     );
-    const enrichmentTask = this.readRecord(
-      normalizedPayload.inputs.enrichmentTask,
-    );
+    const enrichmentTask = readRecord(normalizedPayload.inputs.enrichmentTask);
 
     return this.buildTaskPrompt({
       agentId: input.agentId,
@@ -459,39 +395,37 @@ export class PromptService {
     _retry?: PromptRetryInput,
   ): string {
     const payloadInputs = input.payload.inputs;
-    const retry = this.buildRetryInput(input.payload);
+    const retry = buildRetryInput(input.payload);
     const projectName =
-      this.readString(payloadInputs.projectName) ?? "Unnamed Project";
-    const phaseName = this.readString(payloadInputs.phaseName);
-    const phaseGoal = this.readString(payloadInputs.phaseGoal);
-    const sourceTask = this.readRecord(payloadInputs.sourceTask);
-    const taskPlan = this.readRecordArray(payloadInputs.taskPlan);
-    const dependencyTaskContext = this.readRecordArray(
+      readString(payloadInputs.projectName) ?? promptDefaults.unnamedProject;
+    const phaseName = readString(payloadInputs.phaseName);
+    const phaseGoal = readString(payloadInputs.phaseGoal);
+    const sourceTask = readRecord(payloadInputs.sourceTask);
+    const taskPlan = readRecordArray(payloadInputs.taskPlan);
+    const dependencyTaskContext = readRecordArray(
       payloadInputs.dependencyTaskContext,
     );
-    const milestoneTaskGraph = this.readRecord(
-      payloadInputs.milestoneTaskGraph,
-    );
+    const milestoneTaskGraph = readRecord(payloadInputs.milestoneTaskGraph);
 
     const details = [
-      `Project name: ${projectName}`,
-      ...this.optionalLine("Phase name", phaseName),
-      ...this.optionalLine("Phase goal", phaseGoal),
+      renderLabeledValue(promptLabels.projectName, projectName),
+      ...optionalLine(promptLabels.phaseName, phaseName),
+      ...optionalLine(promptLabels.phaseGoal, phaseGoal),
       "",
-      "Enrich exactly this task without changing the approved plan:",
-      this.stringifyValue(sourceTask ?? {}),
+      promptContent.taskContextLines.enrichSourceTask,
+      stringifyValue(sourceTask ?? {}),
     ];
 
-    const sourceAcceptanceCriteria = this.readStringArray(
+    const sourceAcceptanceCriteria = readStringArray(
       sourceTask?.acceptanceCriteria,
     );
-    const sourceTestingCriteria = this.readStringArray(
-      this.readRecord(sourceTask?.inputs)?.testingCriteria,
+    const sourceTestingCriteria = readStringArray(
+      readRecord(sourceTask?.inputs)?.testingCriteria,
     );
 
-    const requirements = this.renderRequirements({
+    const requirements = renderRequirements({
       agentId: input.agentId,
-      taskPrompt: this.readTaskPrompt(payloadInputs),
+      taskPrompt: readTaskPrompt(payloadInputs),
       ...(sourceAcceptanceCriteria.length > 0
         ? { acceptanceCriteria: sourceAcceptanceCriteria }
         : {}),
@@ -508,48 +442,43 @@ export class PromptService {
       ...(phaseGoal ? { phaseGoal } : {}),
     });
 
-    if (this.isRetry(retry)) {
-      return this.joinSections([
-        this.renderRawSection(promptConfig.sections.task, [
-          "Continue the same task-enrichment work in this session.",
-          `Project name: ${projectName}`,
-          ...(phaseName ? [`Phase name: ${phaseName}`] : []),
-          "Use the existing session context, the source task, and the full task plan to improve this one task only.",
-          "Focus on correcting the specific failure below without changing the approved plan.",
+    if (isRetry(retry)) {
+      return joinSections([
+        renderRawSection(promptConfig.sections.task, [
+          retryTaskContexts.enrichment[0],
+          renderLabeledValue(promptLabels.projectName, projectName),
+          ...(phaseName
+            ? [renderLabeledValue(promptLabels.phaseName, phaseName)]
+            : []),
+          ...retryTaskContexts.enrichment.slice(1),
         ]),
-        this.renderSourceTask(sourceTask),
-        this.renderTaskPlan(taskPlan),
-        this.renderDependencyTaskContext(dependencyTaskContext),
-        this.renderMilestoneTaskGraphSection(milestoneTaskGraph),
-        this.buildRetryBlock(retry),
+        renderSourceTask(sourceTask),
+        renderTaskPlan(taskPlan),
+        renderDependencyTaskContext(dependencyTaskContext),
+        renderMilestoneTaskGraphSection(milestoneTaskGraph),
+        buildRetryBlock(retry),
         requirements,
-        this.renderList(
+        renderList(
           promptConfig.sections.output,
-          this.getOutputReminder("enrichment"),
+          getOutputReminder("enrichment"),
         ),
       ]);
     }
 
-    return this.joinSections([
-      this.renderGlobalLayers("session", "execution"),
-      this.renderList(
+    return joinSections([
+      renderGlobalLayers("session", "execution"),
+      renderList(
         promptConfig.sections.role,
-        this.getAgentRules("project_manager").role,
+        getAgentRules("project_manager").role,
       ),
-      this.renderList(
-        promptConfig.sections.intent,
-        this.getIntentRules("enrich_task" as PromptIntentKey),
-      ),
-      this.renderRawSection(promptConfig.sections.task, details),
-      this.renderTaskPlan(taskPlan),
-      this.renderDependencyTaskContext(dependencyTaskContext),
-      this.renderMilestoneTaskGraphSection(milestoneTaskGraph),
+      renderList(promptConfig.sections.intent, getIntentRules("enrich_task")),
+      renderRawSection(promptConfig.sections.task, details),
+      renderTaskPlan(taskPlan),
+      renderDependencyTaskContext(dependencyTaskContext),
+      renderMilestoneTaskGraphSection(milestoneTaskGraph),
       requirements,
-      this.buildRetryBlock(retry),
-      this.renderList(
-        promptConfig.sections.output,
-        this.getOutputReminder("enrichment"),
-      ),
+      buildRetryBlock(retry),
+      renderList(promptConfig.sections.output, getOutputReminder("enrichment")),
     ]);
   }
 
@@ -559,63 +488,63 @@ export class PromptService {
     _retry?: PromptRetryInput,
   ): string {
     const payloadInputs = input.payload.inputs;
-    const retry = this.buildRetryInput(input.payload);
+    const retry = buildRetryInput(input.payload);
 
     const projectId =
-      this.readString(payloadInputs.projectId) ??
-      this.readString(input.payload.projectId);
+      readString(payloadInputs.projectId) ??
+      readString(input.payload.projectId);
     const projectName =
-      this.readString(payloadInputs.projectName) ?? "Unnamed Project";
+      readString(payloadInputs.projectName) ?? promptDefaults.unnamedProject;
     const requestType =
-      this.readString(payloadInputs.requestType) ??
-      this.readString(payloadInputs.updateRequestType);
+      readString(payloadInputs.requestType) ??
+      readString(payloadInputs.updateRequestType);
     const canonicalProjectRoot =
-      this.readString(payloadInputs.canonicalProjectRoot) ??
-      this.readString(payloadInputs.projectPath);
+      readString(payloadInputs.canonicalProjectRoot) ??
+      readString(payloadInputs.projectPath);
     const rawUpdateRequest =
-      this.readRawUpdateRequest(payloadInputs) ??
-      this.readRawProjectRequest(payloadInputs) ??
-      this.readString(payloadInputs.userRequest) ??
-      this.readString(payloadInputs.request) ??
-      "No update request was provided.";
+      readRawUpdateRequest(payloadInputs) ??
+      readRawProjectRequest(payloadInputs) ??
+      readString(payloadInputs.userRequest) ??
+      readString(payloadInputs.request) ??
+      promptDefaults.missingUpdateRequest;
     const latestAcceptedMilestoneSummary =
-      this.readString(payloadInputs.latestAcceptedMilestoneSummary) ??
-      this.readString(payloadInputs.latestMilestoneSummary) ??
-      this.readString(payloadInputs.projectSummary);
+      readString(payloadInputs.latestAcceptedMilestoneSummary) ??
+      readString(payloadInputs.latestMilestoneSummary) ??
+      readString(payloadInputs.projectSummary);
     const latestReviewOutcome =
-      this.readPromptValue(payloadInputs.latestReviewOutcome) ??
-      this.readPromptValue(payloadInputs.reviewOutcome);
+      readPromptValue(payloadInputs.latestReviewOutcome) ??
+      readPromptValue(payloadInputs.reviewOutcome);
 
     const details = [
-      ...this.optionalLine("Project id", projectId),
-      `Project name: ${projectName}`,
-      ...this.optionalLine("Request type", requestType),
-      ...this.optionalLine("Canonical project root", canonicalProjectRoot),
-      ...this.optionalLine(
-        "App type",
-        this.readPromptValue(payloadInputs.appType),
+      ...optionalLine(promptLabels.projectId, projectId),
+      renderLabeledValue(promptLabels.projectName, projectName),
+      ...optionalLine(promptLabels.requestType, requestType),
+      ...optionalLine(promptLabels.canonicalProjectRoot, canonicalProjectRoot),
+      ...optionalLine(
+        promptLabels.appType,
+        readPromptValue(payloadInputs.appType),
       ),
-      ...this.optionalLine("Stack", this.readPromptValue(payloadInputs.stack)),
-      ...this.optionalLine(
-        "Deployment",
-        this.readPromptValue(payloadInputs.deployment),
+      ...optionalLine(promptLabels.stack, readPromptValue(payloadInputs.stack)),
+      ...optionalLine(
+        promptLabels.deployment,
+        readPromptValue(payloadInputs.deployment),
       ),
       ...(latestAcceptedMilestoneSummary
         ? [
             "",
-            "Latest accepted milestone summary:",
+            promptLabels.latestAcceptedMilestoneSummary,
             latestAcceptedMilestoneSummary,
           ]
         : []),
       ...(latestReviewOutcome
-        ? ["", "Latest review outcome:", latestReviewOutcome]
+        ? ["", promptLabels.latestReviewOutcome, latestReviewOutcome]
         : []),
       "",
-      "Update request:",
+      promptLabels.updateRequest,
       rawUpdateRequest,
     ];
 
-    const requirements = this.renderRequirements({
+    const requirements = renderRequirements({
       agentId: input.agentId,
       taskPrompt: "",
       ...(constraints ? { constraints } : {}),
@@ -624,41 +553,41 @@ export class PromptService {
         : {}),
     });
 
-    if (this.isRetry(retry)) {
-      return this.joinSections([
-        this.renderRawSection(promptConfig.sections.task, [
-          "Continue the same project-update planning task in this session.",
-          ...(projectId ? [`Project id: ${projectId}`] : []),
-          `Project name: ${projectName}`,
-          ...(requestType ? [`Request type: ${requestType}`] : []),
-          "Use the existing session context for the accepted baseline and prior update-planning work.",
-          "Focus on correcting the specific failure below instead of rebuilding the full project lifecycle plan from scratch.",
+    if (isRetry(retry)) {
+      return joinSections([
+        renderRawSection(promptConfig.sections.task, [
+          retryTaskContexts.projectUpdate[0],
+          ...(projectId
+            ? [renderLabeledValue(promptLabels.projectId, projectId)]
+            : []),
+          renderLabeledValue(promptLabels.projectName, projectName),
+          ...(requestType
+            ? [renderLabeledValue(promptLabels.requestType, requestType)]
+            : []),
+          ...retryTaskContexts.projectUpdate.slice(1),
         ]),
-        this.buildRetryBlock(retry),
+        buildRetryBlock(retry),
         requirements,
-        this.renderList(
-          promptConfig.sections.output,
-          this.getOutputReminder("planner"),
-        ),
+        renderList(promptConfig.sections.output, getOutputReminder("planner")),
       ]);
     }
 
-    return this.joinSections([
-      this.renderGlobalLayers("session", "planning"),
-      this.renderList(
+    return joinSections([
+      renderGlobalLayers("session", "planning"),
+      renderList(
         promptConfig.sections.role,
-        this.getAgentRules("product_owner").role,
+        getAgentRules("product_owner").role,
       ),
-      this.renderList(
+      renderList(
         promptConfig.sections.intent,
-        this.getIntentRules(this.resolveProjectUpdatePlanningIntentKey()),
+        getIntentRules(resolveProjectUpdatePlanningIntentKey()),
       ),
-      this.renderRawSection(promptConfig.sections.task, details),
-      this.buildRetryBlock(retry),
+      renderRawSection(promptConfig.sections.task, details),
+      buildRetryBlock(retry),
       requirements,
-      this.renderList(
+      renderList(
         promptConfig.sections.output,
-        this.getOutputReminder("project_owner"),
+        getOutputReminder("project_owner"),
       ),
     ]);
   }
@@ -669,32 +598,32 @@ export class PromptService {
     _retry?: PromptRetryInput,
   ): string {
     const payloadInputs = input.payload.inputs;
-    const retry = this.buildRetryInput(input.payload);
+    const retry = buildRetryInput(input.payload);
 
     const projectName =
-      this.readString(payloadInputs.projectName) ?? "Unnamed Project";
+      readString(payloadInputs.projectName) ?? promptDefaults.unnamedProject;
     const rawProjectRequest =
-      this.readRawProjectRequest(payloadInputs) ??
-      this.readString(payloadInputs.userPrompt) ??
-      "No project request was provided.";
+      readRawProjectRequest(payloadInputs) ??
+      readString(payloadInputs.userPrompt) ??
+      promptDefaults.missingProjectRequest;
 
     const details = [
-      `Project name: ${projectName}`,
-      ...this.optionalLine(
-        "App type",
-        this.readPromptValue(payloadInputs.appType),
+      renderLabeledValue(promptLabels.projectName, projectName),
+      ...optionalLine(
+        promptLabels.appType,
+        readPromptValue(payloadInputs.appType),
       ),
-      ...this.optionalLine("Stack", this.readPromptValue(payloadInputs.stack)),
-      ...this.optionalLine(
-        "Deployment",
-        this.readPromptValue(payloadInputs.deployment),
+      ...optionalLine(promptLabels.stack, readPromptValue(payloadInputs.stack)),
+      ...optionalLine(
+        promptLabels.deployment,
+        readPromptValue(payloadInputs.deployment),
       ),
       "",
-      "Project request:",
+      promptLabels.projectRequest,
       rawProjectRequest,
     ];
 
-    const requirements = this.renderRequirements({
+    const requirements = renderRequirements({
       agentId: input.agentId,
       taskPrompt: "",
       ...(constraints ? { constraints } : {}),
@@ -703,48 +632,47 @@ export class PromptService {
         : {}),
     });
 
-    if (this.isRetry(retry)) {
-      return this.joinSections([
-        // this.renderGlobalLayers("session", "planning"),
-        // this.renderList(
+    if (isRetry(retry)) {
+      return joinSections([
+        // renderGlobalLayers("session", "planning"),
+        // renderList(
         //   promptConfig.sections.role,
-        //   this.getAgentRules("product_owner").role,
+        //   getAgentRules("product_owner").role,
         // ),
-        // this.renderList(
+        // renderList(
         //   promptConfig.sections.intent,
-        //   this.getIntentRules("plan_project_phases"),
+        //   getIntentRules("plan_project_phases"),
         // ),
-        this.renderRawSection(promptConfig.sections.task, [
-          "Continue the same phase-planning task in this session.",
-          `Project name: ${projectName}`,
-          "Use the existing session context for the full project brief and prior work.",
-          "Focus on correcting the specific failure below instead of rebuilding the full plan from scratch.",
+        renderRawSection(promptConfig.sections.task, [
+          retryTaskContexts.projectPhases[0],
+          renderLabeledValue(promptLabels.projectName, projectName),
+          ...retryTaskContexts.projectPhases.slice(1),
         ]),
-        this.buildRetryBlock(retry),
+        buildRetryBlock(retry),
         requirements,
-        this.renderList(
+        renderList(
           promptConfig.sections.output,
-          this.getOutputReminder("project_owner"),
+          getOutputReminder("project_owner"),
         ),
       ]);
     }
 
-    return this.joinSections([
-      this.renderGlobalLayers("session", "planning"),
-      this.renderList(
+    return joinSections([
+      renderGlobalLayers("session", "planning"),
+      renderList(
         promptConfig.sections.role,
-        this.getAgentRules("product_owner").role,
+        getAgentRules("product_owner").role,
       ),
-      this.renderList(
+      renderList(
         promptConfig.sections.intent,
-        this.getIntentRules("plan_project_phases"),
+        getIntentRules("plan_project_phases"),
       ),
-      this.renderRawSection(promptConfig.sections.task, details),
-      this.buildRetryBlock(retry),
+      renderRawSection(promptConfig.sections.task, details),
+      buildRetryBlock(retry),
       requirements,
-      this.renderList(
+      renderList(
         promptConfig.sections.output,
-        this.getOutputReminder("project_owner"),
+        getOutputReminder("project_owner"),
       ),
     ]);
   }
@@ -755,101 +683,102 @@ export class PromptService {
     _retry?: PromptRetryInput,
   ): string {
     const payloadInputs = input.payload.inputs;
-    const retry = this.buildRetryInput(input.payload);
-    const milestone = this.readRecord(payloadInputs.milestone);
-    const phase = this.readRecord(payloadInputs.phase);
+    const retry = buildRetryInput(input.payload);
+    const milestone = readRecord(payloadInputs.milestone);
+    const phase = readRecord(payloadInputs.phase);
 
     const projectName =
-      this.readString(payloadInputs.projectName) ?? "Unnamed Project";
+      readString(payloadInputs.projectName) ?? promptDefaults.unnamedProject;
     const projectSummary =
-      this.readString(payloadInputs.projectSummary) ??
-      this.readString(milestone?.projectSummary);
+      readString(payloadInputs.projectSummary) ??
+      readString(milestone?.projectSummary);
     const milestoneId =
-      this.readString(payloadInputs.milestoneId) ??
-      this.readString(payloadInputs._id) ??
-      this.readString(payloadInputs.id) ??
-      this.readString(milestone?._id) ??
-      this.readString(milestone?.milestoneId) ??
-      this.readString(milestone?.id);
+      readString(payloadInputs.milestoneId) ??
+      readString(payloadInputs._id) ??
+      readString(payloadInputs.id) ??
+      readString(milestone?._id) ??
+      readString(milestone?.milestoneId) ??
+      readString(milestone?.id);
     const milestoneTitle =
-      this.readString(payloadInputs.milestoneTitle) ??
-      this.readString(payloadInputs.title) ??
-      this.readString(milestone?.title) ??
-      this.readString(milestone?.name);
+      readString(payloadInputs.milestoneTitle) ??
+      readString(payloadInputs.title) ??
+      readString(milestone?.title) ??
+      readString(milestone?.name);
     const milestoneGoal =
-      this.readString(payloadInputs.milestoneGoal) ??
-      this.readString(payloadInputs.goal) ??
-      this.readString(milestone?.goal);
+      readString(payloadInputs.milestoneGoal) ??
+      readString(payloadInputs.goal) ??
+      readString(milestone?.goal);
     const milestoneDescription =
-      this.readString(payloadInputs.milestoneDescription) ??
-      this.readString(payloadInputs.description) ??
-      this.readString(milestone?.description);
+      readString(payloadInputs.milestoneDescription) ??
+      readString(payloadInputs.description) ??
+      readString(milestone?.description);
     const milestoneOrder =
-      this.readNumber(payloadInputs.order) ?? this.readNumber(milestone?.order);
+      readNumber(payloadInputs.order) ?? readNumber(milestone?.order);
     const milestoneStatus =
-      this.readString(payloadInputs.status) ??
-      this.readString(milestone?.status);
+      readString(payloadInputs.status) ?? readString(milestone?.status);
     const dependsOnMilestoneId =
-      this.readString(payloadInputs.dependsOnMilestoneId) ??
-      this.readString(milestone?.dependsOnMilestoneId);
-    const scope = this.readStringArray(payloadInputs.milestoneScope);
+      readString(payloadInputs.dependsOnMilestoneId) ??
+      readString(milestone?.dependsOnMilestoneId);
+    const scope = readStringArray(payloadInputs.milestoneScope);
     const scopeFromRecordFields =
-      scope.length > 0 ? scope : this.readStringArray(payloadInputs.scope);
+      scope.length > 0 ? scope : readStringArray(payloadInputs.scope);
     const milestoneScope =
       scopeFromRecordFields.length > 0
         ? scopeFromRecordFields
-        : this.readStringArray(milestone?.scope);
-    const milestoneAcceptanceInput = this.readStringArray(
+        : readStringArray(milestone?.scope);
+    const milestoneAcceptanceInput = readStringArray(
       payloadInputs.milestoneAcceptanceCriteria,
     );
     const milestoneAcceptanceFromRecordFields =
       milestoneAcceptanceInput.length > 0
         ? milestoneAcceptanceInput
-        : this.readStringArray(payloadInputs.acceptanceCriteria);
+        : readStringArray(payloadInputs.acceptanceCriteria);
     const milestoneAcceptanceCriteria =
       milestoneAcceptanceFromRecordFields.length > 0
         ? milestoneAcceptanceFromRecordFields
-        : this.readStringArray(milestone?.acceptanceCriteria);
+        : readStringArray(milestone?.acceptanceCriteria);
 
     const phaseId =
-      this.readString(payloadInputs.phaseId) ??
-      this.readString(phase?.phaseId) ??
-      this.readString(phase?.id);
+      readString(payloadInputs.phaseId) ??
+      readString(phase?.phaseId) ??
+      readString(phase?.id);
     const phaseName =
-      this.readString(payloadInputs.phaseName) ??
-      this.readString(phase?.name) ??
-      "Unnamed Phase";
+      readString(payloadInputs.phaseName) ??
+      readString(phase?.name) ??
+      promptDefaults.unnamedPhase;
     const phaseGoal =
-      this.readString(payloadInputs.phaseGoal) ?? this.readString(phase?.goal);
+      readString(payloadInputs.phaseGoal) ?? readString(phase?.goal);
     const phaseDescription =
-      this.readString(payloadInputs.phaseDescription) ??
-      this.readString(phase?.description);
-    const dependsOn = this.readStringArray(payloadInputs.phaseDependsOn);
+      readString(payloadInputs.phaseDescription) ??
+      readString(phase?.description);
+    const dependsOn = readStringArray(payloadInputs.phaseDependsOn);
     const phaseDependsOn =
-      dependsOn.length > 0 ? dependsOn : this.readStringArray(phase?.dependsOn);
-    const deliverables = this.readStringArray(payloadInputs.phaseDeliverables);
+      dependsOn.length > 0 ? dependsOn : readStringArray(phase?.dependsOn);
+    const deliverables = readStringArray(payloadInputs.phaseDeliverables);
     const phaseDeliverables =
       deliverables.length > 0
         ? deliverables
-        : this.readStringArray(phase?.deliverables);
-    const exitCriteria = this.readStringArray(payloadInputs.phaseExitCriteria);
+        : readStringArray(phase?.deliverables);
+    const exitCriteria = readStringArray(payloadInputs.phaseExitCriteria);
     const phaseExitCriteria =
       exitCriteria.length > 0
         ? exitCriteria
-        : this.readStringArray(phase?.exitCriteria);
+        : readStringArray(phase?.exitCriteria);
 
     const details = [
-      `Project name: ${projectName}`,
-      ...this.optionalLine("Milestone id", milestoneId),
-      ...this.optionalLine("Milestone title", milestoneTitle),
-      ...this.optionalLine("Milestone goal", milestoneGoal),
-      ...this.optionalLine("Milestone description", milestoneDescription),
-      ...this.optionalLine("Depends on milestone id", dependsOnMilestoneId),
+      renderLabeledValue(promptLabels.projectName, projectName),
+      ...optionalLine(promptLabels.milestoneId, milestoneId),
+      ...optionalLine(promptLabels.milestoneTitle, milestoneTitle),
+      ...optionalLine(promptLabels.milestoneGoal, milestoneGoal),
+      ...optionalLine(promptLabels.milestoneDescription, milestoneDescription),
+      ...optionalLine(promptLabels.dependsOnMilestoneId, dependsOnMilestoneId),
       ...(typeof milestoneOrder === "number"
-        ? [`Milestone order: ${String(milestoneOrder)}`]
+        ? [renderLabeledValue(promptLabels.milestoneOrder, milestoneOrder)]
         : []),
-      ...this.optionalLine("Milestone status", milestoneStatus),
-      ...(projectSummary ? ["", "Project summary:", projectSummary] : []),
+      ...optionalLine(promptLabels.milestoneStatus, milestoneStatus),
+      ...(projectSummary
+        ? ["", promptLabels.projectSummary, projectSummary]
+        : []),
       ...(milestoneTitle ||
       milestoneGoal ||
       milestoneDescription ||
@@ -859,16 +788,16 @@ export class PromptService {
       projectSummary
         ? [""]
         : []),
-      ...this.optionalLine("Phase id", phaseId),
-      `Phase name: ${phaseName}`,
-      ...this.optionalLine("Phase goal", phaseGoal),
-      ...this.optionalLine("Phase description", phaseDescription),
+      ...optionalLine(promptLabels.phaseId, phaseId),
+      renderLabeledValue(promptLabels.phaseName, phaseName),
+      ...optionalLine(promptLabels.phaseGoal, phaseGoal),
+      ...optionalLine(promptLabels.phaseDescription, phaseDescription),
       ...(phaseDependsOn.length > 0
-        ? ["", "Phase dependencies:", ...phaseDependsOn]
+        ? ["", promptLabels.phaseDependencies, ...phaseDependsOn]
         : []),
     ];
 
-    const requirements = this.renderRequirements({
+    const requirements = renderRequirements({
       agentId: input.agentId,
       taskPrompt: "",
       ...(constraints ? { constraints } : {}),
@@ -877,60 +806,53 @@ export class PromptService {
         : {}),
     });
 
-    const phaseTaskIntentKey = this.resolvePhaseTaskPlanningIntentKey();
+    const phaseTaskIntentKey = resolvePhaseTaskPlanningIntentKey();
 
-    if (this.isRetry(retry)) {
-      return this.joinSections([
-        // this.renderGlobalLayers("session", "planning"),
-        // this.renderList(
+    if (isRetry(retry)) {
+      return joinSections([
+        // renderGlobalLayers("session", "planning"),
+        // renderList(
         //   promptConfig.sections.role,
-        //   this.getAgentRules("project_manager").role,
+        //   getAgentRules("project_manager").role,
         // ),
-        // this.renderList(
+        // renderList(
         //   promptConfig.sections.intent,
-        //   this.getIntentRules(phaseTaskIntentKey),
+        //   getIntentRules(phaseTaskIntentKey),
         // ),
-        this.renderRawSection(promptConfig.sections.task, [
-          "Continue the same phase-task planning task in this session.",
-          `Project name: ${projectName}`,
-          ...this.optionalLine("Milestone title", milestoneTitle),
-          `Phase name: ${phaseName}`,
-          "Use the existing session context for the full milestone and phase details.",
-          "Focus on correcting the specific failure below instead of rebuilding the entire task plan from scratch.",
+        renderRawSection(promptConfig.sections.task, [
+          retryTaskContexts.phaseTasks[0],
+          renderLabeledValue(promptLabels.projectName, projectName),
+          ...optionalLine(promptLabels.milestoneTitle, milestoneTitle),
+          renderLabeledValue(promptLabels.phaseName, phaseName),
+          ...retryTaskContexts.phaseTasks.slice(1),
         ]),
-        this.buildRetryBlock(retry),
+        buildRetryBlock(retry),
         requirements,
-        this.renderList(
-          promptConfig.sections.output,
-          this.getOutputReminder("planner"),
-        ),
+        renderList(promptConfig.sections.output, getOutputReminder("planner")),
       ]);
     }
 
-    return this.joinSections([
-      this.renderGlobalLayers("session", "planning"),
-      this.renderList(
+    return joinSections([
+      renderGlobalLayers("session", "planning"),
+      renderList(
         promptConfig.sections.role,
-        this.getAgentRules("project_manager").role,
+        getAgentRules("project_manager").role,
       ),
-      this.renderList(
+      renderList(
         promptConfig.sections.intent,
-        this.getIntentRules(phaseTaskIntentKey),
+        getIntentRules(phaseTaskIntentKey),
       ),
-      this.renderRawSection(promptConfig.sections.task, details),
-      this.renderList("Milestone Scope", milestoneScope),
-      this.renderList(
-        "Milestone Acceptance Criteria",
+      renderRawSection(promptConfig.sections.task, details),
+      renderList(promptLabels.milestoneScope, milestoneScope),
+      renderList(
+        promptLabels.milestoneAcceptanceCriteria,
         milestoneAcceptanceCriteria,
       ),
-      this.renderList("Phase Deliverables", phaseDeliverables),
-      this.renderList("Phase Exit Criteria", phaseExitCriteria),
-      this.buildRetryBlock(retry),
+      renderList(promptLabels.phaseDeliverables, phaseDeliverables),
+      renderList(promptLabels.phaseExitCriteria, phaseExitCriteria),
+      buildRetryBlock(retry),
       requirements,
-      this.renderList(
-        promptConfig.sections.output,
-        this.getOutputReminder("planner"),
-      ),
+      renderList(promptConfig.sections.output, getOutputReminder("planner")),
     ]);
   }
 
@@ -948,128 +870,134 @@ export class PromptService {
     _retry?: PromptRetryInput,
   ): string {
     const payloadInputs = input.payload.inputs;
-    const retry = this.buildRetryInput(input.payload);
-    const milestone = this.readRecord(payloadInputs.milestone);
-    const phase = this.readRecord(payloadInputs.phase);
-    const reviewContract = this.readRecord(payloadInputs.reviewContract);
-    const milestoneExecution = this.readRecord(
-      payloadInputs.milestoneExecution,
-    );
+    const retry = buildRetryInput(input.payload);
+    const milestone = readRecord(payloadInputs.milestone);
+    const phase = readRecord(payloadInputs.phase);
+    const reviewContract = readRecord(payloadInputs.reviewContract);
+    const milestoneExecution = readRecord(payloadInputs.milestoneExecution);
 
     const projectName =
-      this.readString(payloadInputs.projectName) ?? "Unnamed Project";
-    const projectBrief = this.readMilestoneReviewProjectBrief(payloadInputs);
+      readString(payloadInputs.projectName) ?? promptDefaults.unnamedProject;
+    const projectBrief = readMilestoneReviewProjectBrief(payloadInputs);
     const milestoneId =
-      this.readString(payloadInputs.milestoneId) ??
-      this.readString(payloadInputs._id) ??
-      this.readString(payloadInputs.id) ??
-      this.readString(milestone?._id) ??
-      this.readString(milestone?.milestoneId) ??
-      this.readString(milestone?.id);
+      readString(payloadInputs.milestoneId) ??
+      readString(payloadInputs._id) ??
+      readString(payloadInputs.id) ??
+      readString(milestone?._id) ??
+      readString(milestone?.milestoneId) ??
+      readString(milestone?.id);
     const milestoneTitle =
-      this.readString(payloadInputs.milestoneTitle) ??
-      this.readString(payloadInputs.title) ??
-      this.readString(milestone?.title) ??
-      this.readString(milestone?.name) ??
-      "Unnamed Milestone";
+      readString(payloadInputs.milestoneTitle) ??
+      readString(payloadInputs.title) ??
+      readString(milestone?.title) ??
+      readString(milestone?.name) ??
+      promptDefaults.unnamedMilestone;
     const milestoneGoal =
-      this.readString(payloadInputs.milestoneGoal) ??
-      this.readString(payloadInputs.goal) ??
-      this.readString(milestone?.goal);
+      readString(payloadInputs.milestoneGoal) ??
+      readString(payloadInputs.goal) ??
+      readString(milestone?.goal);
     const milestoneDescription =
-      this.readString(payloadInputs.milestoneDescription) ??
-      this.readString(payloadInputs.description) ??
-      this.readString(milestone?.description);
+      readString(payloadInputs.milestoneDescription) ??
+      readString(payloadInputs.description) ??
+      readString(milestone?.description);
     const milestoneOrder =
-      this.readNumber(payloadInputs.milestoneOrder) ??
-      this.readNumber(payloadInputs.order) ??
-      this.readNumber(milestone?.order);
+      readNumber(payloadInputs.milestoneOrder) ??
+      readNumber(payloadInputs.order) ??
+      readNumber(milestone?.order);
     const milestoneStatus =
-      this.readString(payloadInputs.milestoneStatus) ??
-      this.readString(payloadInputs.status) ??
-      this.readString(milestone?.status);
+      readString(payloadInputs.milestoneStatus) ??
+      readString(payloadInputs.status) ??
+      readString(milestone?.status);
     const dependsOnMilestoneId =
-      this.readString(payloadInputs.dependsOnMilestoneId) ??
-      this.readString(milestone?.dependsOnMilestoneId);
+      readString(payloadInputs.dependsOnMilestoneId) ??
+      readString(milestone?.dependsOnMilestoneId);
 
-    const milestoneScopeInput = this.readStringArray(
-      payloadInputs.milestoneScope,
-    );
+    const milestoneScopeInput = readStringArray(payloadInputs.milestoneScope);
     const milestoneScope =
       milestoneScopeInput.length > 0
         ? milestoneScopeInput
-        : this.readStringArray(payloadInputs.scope).length > 0
-          ? this.readStringArray(payloadInputs.scope)
-          : this.readStringArray(milestone?.scope);
+        : readStringArray(payloadInputs.scope).length > 0
+          ? readStringArray(payloadInputs.scope)
+          : readStringArray(milestone?.scope);
 
-    const milestoneAcceptanceInput = this.readStringArray(
+    const milestoneAcceptanceInput = readStringArray(
       payloadInputs.milestoneAcceptanceCriteria,
     );
     const milestoneAcceptanceCriteria =
       milestoneAcceptanceInput.length > 0
         ? milestoneAcceptanceInput
-        : this.readStringArray(payloadInputs.acceptanceCriteria).length > 0
-          ? this.readStringArray(payloadInputs.acceptanceCriteria)
-          : this.readStringArray(milestone?.acceptanceCriteria);
+        : readStringArray(payloadInputs.acceptanceCriteria).length > 0
+          ? readStringArray(payloadInputs.acceptanceCriteria)
+          : readStringArray(milestone?.acceptanceCriteria);
 
     const phaseId =
-      this.readString(payloadInputs.phaseId) ??
-      this.readString(phase?.phaseId) ??
-      this.readString(phase?.id);
+      readString(payloadInputs.phaseId) ??
+      readString(phase?.phaseId) ??
+      readString(phase?.id);
     const phaseName =
-      this.readString(payloadInputs.phaseName) ??
-      this.readString(phase?.name) ??
-      "Milestone Review";
+      readString(payloadInputs.phaseName) ??
+      readString(phase?.name) ??
+      promptDefaults.milestoneReviewTitle;
     const phaseGoal =
-      this.readString(payloadInputs.phaseGoal) ?? this.readString(phase?.goal);
+      readString(payloadInputs.phaseGoal) ?? readString(phase?.goal);
 
-    const reviewEvidence = this.readRecordArray(
+    const reviewEvidence = readRecordArray(
       milestoneExecution?.tasks ?? payloadInputs.milestoneExecution,
     );
     const completedTaskCount =
-      this.readNumber(payloadInputs.completedTaskCount) ??
-      this.readNumber(milestoneExecution?.completedTaskCount) ??
+      readNumber(payloadInputs.completedTaskCount) ??
+      readNumber(milestoneExecution?.completedTaskCount) ??
       reviewEvidence.length;
-    const allowedDecisions = this.readStringArray(
+    const allowedDecisions = readStringArray(
       reviewContract?.allowedDecisions ?? payloadInputs.reviewDecisionOptions,
     );
     const reviewDecisionOptions =
-      allowedDecisions.length > 0 ? allowedDecisions : ["pass", "patch"];
+      allowedDecisions.length > 0
+        ? allowedDecisions
+        : [...milestoneReviewCopy.defaultAllowedDecisions];
     const patchRule =
-      this.readString(reviewContract?.patchRule) ??
-      this.readString(payloadInputs.patchRule);
+      readString(reviewContract?.patchRule) ??
+      readString(payloadInputs.patchRule);
 
     const details = [
-      `Project name: ${projectName}`,
-      ...this.optionalLine("Milestone id", milestoneId),
-      `Milestone title: ${milestoneTitle}`,
-      ...this.optionalLine("Milestone goal", milestoneGoal),
-      ...this.optionalLine("Milestone description", milestoneDescription),
-      ...this.optionalLine("Depends on milestone id", dependsOnMilestoneId),
+      renderLabeledValue(promptLabels.projectName, projectName),
+      ...optionalLine(promptLabels.milestoneId, milestoneId),
+      renderLabeledValue(promptLabels.milestoneTitle, milestoneTitle),
+      ...optionalLine(promptLabels.milestoneGoal, milestoneGoal),
+      ...optionalLine(promptLabels.milestoneDescription, milestoneDescription),
+      ...optionalLine(promptLabels.dependsOnMilestoneId, dependsOnMilestoneId),
       ...(typeof milestoneOrder === "number"
-        ? [`Milestone order: ${String(milestoneOrder)}`]
+        ? [renderLabeledValue(promptLabels.milestoneOrder, milestoneOrder)]
         : []),
-      ...this.optionalLine("Milestone status", milestoneStatus),
-      ...this.optionalLine("Phase id", phaseId),
-      `Phase name: ${phaseName}`,
-      ...this.optionalLine("Phase goal", phaseGoal),
+      ...optionalLine(promptLabels.milestoneStatus, milestoneStatus),
+      ...optionalLine(promptLabels.phaseId, phaseId),
+      renderLabeledValue(promptLabels.phaseName, phaseName),
+      ...optionalLine(promptLabels.phaseGoal, phaseGoal),
       ...(typeof completedTaskCount === "number"
-        ? [`Completed milestone task count: ${String(completedTaskCount)}`]
+        ? [
+            renderLabeledValue(
+              promptLabels.completedMilestoneTaskCount,
+              completedTaskCount,
+            ),
+          ]
         : []),
-      ...(projectBrief ? ["", "Original project brief:", projectBrief] : []),
+      ...(projectBrief
+        ? ["", promptLabels.originalProjectBrief, projectBrief]
+        : []),
     ];
 
     const reviewInstructions = [
-      "Review only the stated milestone scope and acceptance criteria.",
-      "Decide whether the milestone passes as-is or needs a patch milestone.",
-      `Allowed decisions: ${reviewDecisionOptions.join(" | ")}`,
+      milestoneReviewCopy.instructions[0],
+      milestoneReviewCopy.instructions[1],
+      renderLabeledValue(
+        milestoneReviewCopy.allowedDecisionPrefix,
+        reviewDecisionOptions.join(" | "),
+      ),
       ...(patchRule ? [patchRule] : []),
-      "Do not expand the scope.",
-      "If a patch is needed, define only the smallest valid follow-up milestone required to satisfy the current milestone acceptance criteria.",
-      "Base the decision on the milestone evidence summary below and the milestone acceptance criteria.",
+      ...milestoneReviewCopy.instructions.slice(2),
     ];
 
-    const requirements = this.renderRequirements({
+    const requirements = renderRequirements({
       agentId: input.agentId,
       taskPrompt: "",
       ...(constraints ? { constraints } : {}),
@@ -1078,1113 +1006,49 @@ export class PromptService {
         : {}),
     });
 
-    if (this.isRetry(retry)) {
-      return this.joinSections([
-        this.renderRawSection(promptConfig.sections.task, [
-          "Continue the same milestone review in this session.",
-          `Project name: ${projectName}`,
-          `Milestone title: ${milestoneTitle}`,
-          "Use the existing session context for detailed evidence and prior checks.",
-          "Focus on producing a clean pass-or-patch decision grounded in the milestone acceptance criteria.",
+    if (isRetry(retry)) {
+      return joinSections([
+        renderRawSection(promptConfig.sections.task, [
+          retryTaskContexts.milestoneReview[0],
+          renderLabeledValue(promptLabels.projectName, projectName),
+          renderLabeledValue(promptLabels.milestoneTitle, milestoneTitle),
+          ...retryTaskContexts.milestoneReview.slice(1),
         ]),
-        this.renderList(promptConfig.sections.intent, reviewInstructions),
-        this.renderList("Milestone Scope", milestoneScope),
-        this.renderList(
-          "Milestone Acceptance Criteria",
+        renderList(promptConfig.sections.intent, reviewInstructions),
+        renderList(promptLabels.milestoneScope, milestoneScope),
+        renderList(
+          promptLabels.milestoneAcceptanceCriteria,
           milestoneAcceptanceCriteria,
         ),
-        this.renderMilestoneExecutionEvidence(reviewEvidence),
-        this.buildRetryBlock(retry),
+        renderMilestoneExecutionEvidence(reviewEvidence),
+        buildRetryBlock(retry),
         requirements,
-        this.renderMilestoneReviewOutputGuidance(),
+        renderMilestoneReviewOutputGuidance(),
       ]);
     }
 
-    return this.joinSections([
-      this.renderGlobalLayers("session", "execution"),
-      this.renderList(
+    return joinSections([
+      renderGlobalLayers("session", "execution"),
+      renderList(
         promptConfig.sections.role,
-        this.getAgentRules("product_owner").role,
+        getAgentRules("product_owner").role,
       ),
-      this.renderList(promptConfig.sections.intent, reviewInstructions),
-      this.renderRawSection(promptConfig.sections.task, details),
-      this.renderList("Milestone Scope", milestoneScope),
-      this.renderList(
-        "Milestone Acceptance Criteria",
+      renderList(promptConfig.sections.intent, reviewInstructions),
+      renderRawSection(promptConfig.sections.task, details),
+      renderList(promptLabels.milestoneScope, milestoneScope),
+      renderList(
+        promptLabels.milestoneAcceptanceCriteria,
         milestoneAcceptanceCriteria,
       ),
-      this.renderMilestoneExecutionEvidence(reviewEvidence),
-      this.buildRetryBlock(retry),
+      renderMilestoneExecutionEvidence(reviewEvidence),
+      buildRetryBlock(retry),
       requirements,
-      this.renderMilestoneReviewOutputGuidance(),
+      renderMilestoneReviewOutputGuidance(),
     ]);
-  }
-
-  private normalizePayloadInputs(
-    inputs: Record<string, unknown>,
-  ): Record<string, unknown> {
-    const embeddedInputs = this.readEmbeddedPromptRecord(inputs);
-
-    if (!embeddedInputs) {
-      return inputs;
-    }
-
-    return {
-      ...embeddedInputs,
-      ...inputs,
-      ...(embeddedInputs.milestone && !inputs.milestone
-        ? { milestone: embeddedInputs.milestone }
-        : {}),
-      ...(embeddedInputs.phase && !inputs.phase
-        ? { phase: embeddedInputs.phase }
-        : {}),
-    };
-  }
-
-  private shouldUseProjectUpdatePlanningPrompt(
-    inputs: Record<string, unknown>,
-  ): boolean {
-    const updateSignals = [
-      this.readString(inputs.requestType),
-      this.readString(inputs.updateRequestType),
-      this.readString(inputs.canonicalProjectRoot),
-      this.readString(inputs.latestAcceptedMilestoneSummary),
-      this.readString(inputs.latestMilestoneSummary),
-      this.readString(inputs.latestReviewOutcome),
-      this.readString(inputs.reviewOutcome),
-      this.readString(inputs.userRequest),
-      this.readString(inputs.request),
-    ];
-
-    return Boolean(
-      this.readString(inputs.projectName) &&
-      (inputs.isProjectUpdate === true ||
-        updateSignals.some(
-          (value) => typeof value === "string" && value.length > 0,
-        )),
-    );
-  }
-
-  private shouldUseProjectPhasePlanningPrompt(
-    inputs: Record<string, unknown>,
-  ): boolean {
-    return Boolean(
-      this.readString(inputs.projectName) &&
-      (this.readString(inputs.projectRequest) ||
-        this.readString(inputs.userPrompt)) &&
-      !this.shouldUseProjectUpdatePlanningPrompt(inputs) &&
-      !this.shouldUseMilestoneTaskPlanningPrompt(inputs),
-    );
-  }
-
-  private shouldUseMilestoneTaskPlanningPrompt(
-    inputs: Record<string, unknown>,
-  ): boolean {
-    const phase = this.readRecord(inputs.phase);
-
-    return Boolean(
-      this.readString(inputs.milestoneId) &&
-      (this.readString(inputs.phaseId) ||
-        this.readString(inputs.phaseName) ||
-        this.readString(inputs.phaseGoal) ||
-        phase),
-    );
-  }
-
-  private shouldUseMilestoneReviewPrompt(
-    inputs: Record<string, unknown>,
-  ): boolean {
-    const milestone = this.readRecord(inputs.milestone);
-    const reviewContract = this.readRecord(inputs.reviewContract);
-    const milestoneExecution = this.readRecord(inputs.milestoneExecution);
-
-    return (
-      Boolean(
-        this.readString(inputs.milestoneId) ||
-        this.readString(inputs.milestoneTitle) ||
-        milestone,
-      ) && Boolean(reviewContract || milestoneExecution)
-    );
-  }
-
-  private isPhaseTaskPlanningIntent(intent?: string): boolean {
-    return intent === "plan_milestone_tasks" || intent === "plan_phase_tasks";
-  }
-
-  private resolvePhaseTaskPlanningIntentKey(): PromptIntentKey {
-    return (
-      "plan_phase_tasks" in promptConfig.intents
-        ? "plan_phase_tasks"
-        : "plan_milestone_tasks"
-    ) as PromptIntentKey;
-  }
-
-  private resolveProjectUpdatePlanningIntentKey(): PromptIntentKey {
-    return (
-      "plan_project_update" in promptConfig.intents
-        ? "plan_project_update"
-        : "plan_project_phases"
-    ) as PromptIntentKey;
-  }
-
-  private readPromptValue(value: unknown): string | undefined {
-    if (typeof value === "undefined") {
-      return undefined;
-    }
-
-    return this.formatPromptValue(value);
-  }
-
-  private formatPromptValue(value: unknown): string | undefined {
-    if (typeof value === "string") {
-      const trimmed = value.trim();
-
-      return trimmed.length > 0 ? trimmed : undefined;
-    }
-
-    if (
-      typeof value === "number" ||
-      typeof value === "boolean" ||
-      value === null
-    ) {
-      return String(value);
-    }
-
-    if (Array.isArray(value)) {
-      if (value.length === 0) {
-        return undefined;
-      }
-
-      return this.stringifyValue(value);
-    }
-
-    if (this.readRecord(value)) {
-      return this.stringifyValue(value);
-    }
-
-    return undefined;
-  }
-
-  private buildRetryInput(
-    payload: OpenClawTaskPayloadLike,
-  ): PromptRetryInput | undefined {
-    const hasRetryContext =
-      (typeof payload.attemptNumber === "number" &&
-        payload.attemptNumber > 1) ||
-      typeof payload.lastError === "string" ||
-      (Array.isArray(payload.errors) && payload.errors.length > 0);
-
-    if (!hasRetryContext) {
-      return undefined;
-    }
-
-    return {
-      attemptNumber: payload.attemptNumber ?? 1,
-      ...(typeof payload.lastError === "string"
-        ? { failureMessage: payload.lastError }
-        : {}),
-      ...(payload.outputs ? { previousOutputs: payload.outputs } : {}),
-      ...(payload.artifacts ? { previousArtifacts: payload.artifacts } : {}),
-      ...(payload.errors ? { previousErrors: payload.errors } : {}),
-    };
   }
 
   buildRetryBlock(input?: PromptRetryInput): string | undefined {
-    if (!input) {
-      return undefined;
-    }
-
-    const failureMessage =
-      input.failureMessage ??
-      this.compactRetryErrors(input.previousErrors).at(-1) ??
-      promptConfig.content.defaults.missingRetryFailureMessage;
-
-    return `${promptConfig.sections.retry}:\n- ${promptConfig.content.labels.failureMessage}: ${failureMessage}`;
-  }
-
-  private buildMinimalPayloadRetryPrompt(
-    input: OpenClawPromptBuildInput,
-    retry: PromptRetryInput,
-  ): string {
-    return (
-      this.joinSections([
-        this.renderRawSection(
-          promptConfig.sections.task,
-          this.resolvePayloadRetryTaskContext(input),
-        ),
-        this.buildRetryBlock(retry),
-      ]) ?? ""
-    );
-  }
-
-  private resolvePayloadRetryTaskContext(
-    input: OpenClawPromptBuildInput,
-  ): string[] {
-    const payloadInputs = input.payload.inputs;
-    const intent = this.readString(input.payload.intent);
-    const projectName =
-      this.readString(payloadInputs.projectName) ??
-      promptConfig.content.defaults.unnamedProject;
-    const projectId =
-      this.readString(payloadInputs.projectId) ??
-      this.readString(input.payload.projectId);
-    const requestType = this.readString(payloadInputs.requestType);
-    const phaseName =
-      this.readString(payloadInputs.phaseName) ??
-      promptConfig.content.defaults.unnamedPhase;
-    const milestoneTitle =
-      this.readString(payloadInputs.milestoneTitle) ??
-      this.readString(payloadInputs.title) ??
-      promptConfig.content.defaults.unnamedMilestone;
-
-    if (
-      intent === "plan_project_update" ||
-      ((intent === "plan_project_phases" || !intent) &&
-        this.shouldUseProjectUpdatePlanningPrompt(payloadInputs))
-    ) {
-      const context = promptConfig.content.retryTaskContexts.projectUpdate;
-      return [
-        context[0],
-        ...(projectId
-          ? [`${promptConfig.content.labels.projectId}: ${projectId}`]
-          : []),
-        `${promptConfig.content.labels.projectName}: ${projectName}`,
-        ...(requestType
-          ? [`${promptConfig.content.labels.requestType}: ${requestType}`]
-          : []),
-        ...context.slice(1),
-      ];
-    }
-
-    if (intent === "plan_project_phases") {
-      const context = promptConfig.content.retryTaskContexts.projectPhases;
-      return [
-        context[0],
-        `${promptConfig.content.labels.projectName}: ${projectName}`,
-        ...context.slice(1),
-      ];
-    }
-
-    if (this.isPhaseTaskPlanningIntent(intent)) {
-      const context = promptConfig.content.retryTaskContexts.phaseTasks;
-      return [
-        context[0],
-        `${promptConfig.content.labels.projectName}: ${projectName}`,
-        `${promptConfig.content.labels.milestoneTitle}: ${milestoneTitle}`,
-        `${promptConfig.content.labels.phaseName}: ${phaseName}`,
-        ...context.slice(1),
-      ];
-    }
-
-    if (intent === "enrich_task") {
-      const context = promptConfig.content.retryTaskContexts.enrichment;
-      return [
-        context[0],
-        `${promptConfig.content.labels.projectName}: ${projectName}`,
-        `${promptConfig.content.labels.phaseName}: ${phaseName}`,
-        ...context.slice(1),
-      ];
-    }
-
-    if (intent === "review_milestone") {
-      const context = promptConfig.content.retryTaskContexts.milestoneReview;
-      return [
-        context[0],
-        `${promptConfig.content.labels.projectName}: ${projectName}`,
-        `${promptConfig.content.labels.milestoneTitle}: ${milestoneTitle}`,
-        ...context.slice(1),
-      ];
-    }
-
-    const taskPrompt = this.readTaskPrompt(payloadInputs);
-    const reminder = this.compactTaskReminder(taskPrompt);
-
-    return [
-      ...promptConfig.content.retryTaskContexts.generic,
-      ...(reminder
-        ? ["", `${promptConfig.content.labels.taskReminder}: ${reminder}`]
-        : []),
-    ];
-  }
-
-  private isRetry(input?: PromptRetryInput): input is PromptRetryInput {
-    return Boolean(input && input.attemptNumber > 1);
-  }
-
-  private renderRetryTaskContext(input: PromptBuildInput): string {
-    const reminder = this.compactTaskReminder(input.taskPrompt);
-
-    const lines = [
-      "Continue the same assigned task in this session.",
-      "Use the existing session context for the full task details and any prior work.",
-      "Focus on correcting the specific failure below instead of restarting from scratch.",
-      ...(reminder ? ["", `Task reminder: ${reminder}`] : []),
-      ...(input.projectPath ? ["", `Project path: ${input.projectPath}`] : []),
-    ];
-
-    return this.renderRawSection(promptConfig.sections.task, lines) ?? "";
-  }
-
-  private compactTaskReminder(taskPrompt: string): string | undefined {
-    const trimmed = taskPrompt.trim();
-    if (!trimmed) {
-      return undefined;
-    }
-
-    const normalized = trimmed.replace(/\s+/g, " ");
-    if (normalized.length <= 220) {
-      return normalized;
-    }
-
-    return `${normalized.slice(0, 217).replace(/\s+$/u, "")}...`;
-  }
-
-  private compactRetryErrors(errors?: string[]): string[] {
-    if (!errors || errors.length === 0) {
-      return [];
-    }
-
-    const uniqueErrors: string[] = [];
-
-    for (const error of errors) {
-      const trimmed = error.trim();
-      if (!trimmed || uniqueErrors.indexOf(trimmed) !== -1) {
-        continue;
-      }
-
-      uniqueErrors.push(trimmed);
-    }
-
-    return uniqueErrors.slice(-3);
-  }
-
-  private renderTaskContext(input: PromptBuildInput): string {
-    const lines = [
-      "Task prompt:",
-      input.taskPrompt,
-      ...(input.systemTaskType
-        ? ["", `System task type: ${input.systemTaskType}`]
-        : []),
-      ...(input.plannedTaskIntent
-        ? [`Planned task intent: ${input.plannedTaskIntent}`]
-        : []),
-      ...(input.phaseName ? [`Phase name: ${input.phaseName}`] : []),
-      ...(input.phaseGoal ? [`Phase goal: ${input.phaseGoal}`] : []),
-      ...(input.projectPath ? ["", `Project path: ${input.projectPath}`] : []),
-    ];
-
-    const taskPlanSection = this.shouldRenderGenericTaskPlan(input)
-      ? this.renderTaskPlan(input.taskPlan)
-      : undefined;
-
-    return (
-      this.joinSections([
-        this.renderRawSection(promptConfig.sections.task, lines),
-        this.renderSourceTask(input.sourceTask),
-        taskPlanSection,
-        this.renderDependencyTaskContext(input.dependencyTaskContext),
-        this.renderMilestoneTaskGraphSection(input.milestoneTaskGraph),
-        this.renderEnrichmentContext(input.enrichment),
-        this.renderRelatedEnrichmentTask(input.enrichmentTask),
-      ]) ?? ""
-    );
-  }
-
-  private shouldRenderGenericTaskPlan(input: PromptBuildInput): boolean {
-    if (!input.taskPlan || input.taskPlan.length === 0) {
-      return false;
-    }
-
-    const agentKey = this.resolveAgentKey(input.agentId);
-
-    if (agentKey === "project_manager" || agentKey === "product_owner") {
-      return true;
-    }
-
-    if (
-      input.intent === "plan_project_phases" ||
-      input.intent === "plan_project_update" ||
-      input.intent === "plan_phase_tasks" ||
-      input.intent === "plan_next_tasks" ||
-      input.intent === "review_milestone" ||
-      input.intent === "enrich_task"
-    ) {
-      return true;
-    }
-
-    return false;
-  }
-
-  private renderRequirements(input: PromptBuildInput): string | undefined {
-    return this.joinSections([
-      this.renderList("Acceptance Criteria", input.acceptanceCriteria),
-      this.renderList("Testing Criteria", input.testingCriteria),
-      this.renderList("Constraints", input.constraints),
-    ]);
-  }
-
-  private renderOutputGuidance(agentKey: PromptAgentKey): string | undefined {
-    const agentRules = this.getAgentRules(agentKey);
-    const reminderKey: OutputReminderKey =
-      agentKey === "project_manager"
-        ? "planner"
-        : agentKey === "product_owner"
-          ? "project_owner"
-          : agentKey === "qa"
-            ? "qa"
-            : "default";
-
-    const items = [
-      ...agentRules.output,
-      ...this.getOutputReminder(reminderKey),
-    ];
-
-    return this.renderList(promptConfig.sections.output, items);
-  }
-
-  private renderGlobalLayers(
-    ...layers: PromptGlobalLayerKey[]
-  ): string | undefined {
-    const items = layers.flatMap((layer) => this.getGlobalLayer(layer));
-    return this.renderList(promptConfig.sections.global, items);
-  }
-
-  private getGlobalLayer(layer: PromptGlobalLayerKey): string[] {
-    return [...promptConfig.global[layer]];
-  }
-
-  private resolveAgentKey(agentId: string): PromptAgentKey {
-    const normalized = agentId.replace(/-/g, "_");
-    return (
-      normalized in promptConfig.agents ? normalized : "default"
-    ) as PromptAgentKey;
-  }
-
-  private resolveIntentKey(intent?: string): PromptIntentKey {
-    if (!intent) {
-      return "default";
-    }
-
-    const normalizedIntent =
-      intent === "plan_phase_tasks" && !(intent in promptConfig.intents)
-        ? "plan_milestone_tasks"
-        : intent === "plan_project_update" && !(intent in promptConfig.intents)
-          ? "plan_project_phases"
-          : intent;
-
-    return (
-      normalizedIntent in promptConfig.intents ? normalizedIntent : "default"
-    ) as PromptIntentKey;
-  }
-
-  private getAgentRules(agentId: PromptAgentKey) {
-    return promptConfig.agents[agentId] ?? promptConfig.agents.default;
-  }
-
-  private getIntentRules(intent: PromptIntentKey): string[] {
-    return [...promptConfig.intents[intent]];
-  }
-
-  private getRetryRules(failureType?: string): string[] {
-    if (!failureType) {
-      return [...promptConfig.retries.default];
-    }
-
-    const retryKey = this.resolveRetryKey(failureType);
-    return [...promptConfig.retries[retryKey]];
-  }
-
-  private resolveRetryKey(failureType: string): PromptRetryKey {
-    return (
-      failureType in promptConfig.retries ? failureType : "default"
-    ) as PromptRetryKey;
-  }
-
-  private getOutputReminder(key: OutputReminderKey): string[] {
-    return [...promptConfig.outputReminders[key]];
-  }
-
-  private readEmbeddedPromptRecord(
-    inputs: Record<string, unknown>,
-  ): Record<string, unknown> | undefined {
-    const promptValue = this.readString(inputs.prompt);
-    if (!promptValue) {
-      return undefined;
-    }
-
-    return this.extractEmbeddedJsonRecord(promptValue);
-  }
-
-  private extractEmbeddedJsonRecord(
-    value: string,
-  ): Record<string, unknown> | undefined {
-    const trimmed = value.trim();
-
-    const directRecord = this.parseJsonRecord(trimmed);
-    if (directRecord) {
-      return directRecord;
-    }
-
-    const marker = "Task prompt:";
-    const markerIndex = trimmed.indexOf(marker);
-    if (markerIndex !== -1) {
-      const afterMarker = trimmed.slice(markerIndex + marker.length).trim();
-      const markedRecord = this.extractFirstJsonRecord(afterMarker);
-      if (markedRecord) {
-        return markedRecord;
-      }
-    }
-
-    return this.extractFirstJsonRecord(trimmed);
-  }
-
-  private extractFirstJsonRecord(
-    value: string,
-  ): Record<string, unknown> | undefined {
-    const startIndex = value.indexOf("{");
-    if (startIndex === -1) {
-      return undefined;
-    }
-
-    let depth = 0;
-    let inString = false;
-    let isEscaped = false;
-
-    for (let index = startIndex; index < value.length; index += 1) {
-      const char = value[index];
-
-      if (inString) {
-        if (isEscaped) {
-          isEscaped = false;
-          continue;
-        }
-
-        if (char === "\\") {
-          isEscaped = true;
-          continue;
-        }
-
-        if (char === '"') {
-          inString = false;
-        }
-
-        continue;
-      }
-
-      if (char === '"') {
-        inString = true;
-        continue;
-      }
-
-      if (char === "{") {
-        depth += 1;
-        continue;
-      }
-
-      if (char === "}") {
-        depth -= 1;
-
-        if (depth === 0) {
-          const candidate = value.slice(startIndex, index + 1);
-          return this.parseJsonRecord(candidate);
-        }
-      }
-    }
-
-    return undefined;
-  }
-
-  private parseJsonRecord(value: string): Record<string, unknown> | undefined {
-    try {
-      const parsed = JSON.parse(value);
-      return this.readRecord(parsed);
-    } catch {
-      return undefined;
-    }
-  }
-
-  private readRawUpdateRequest(
-    inputs: Record<string, unknown>,
-  ): string | undefined {
-    const directUpdateRequest =
-      this.readString(inputs.updateRequest) ??
-      this.readString(inputs.userRequest) ??
-      this.readString(inputs.request);
-
-    if (directUpdateRequest) {
-      return this.extractUpdateRequestSection(directUpdateRequest);
-    }
-
-    const promptValue = this.readString(inputs.prompt);
-    if (promptValue) {
-      return this.extractUpdateRequestSection(promptValue);
-    }
-
-    return undefined;
-  }
-
-  private readRawProjectRequest(
-    inputs: Record<string, unknown>,
-  ): string | undefined {
-    const directProjectRequest = this.readString(inputs.projectRequest);
-    if (directProjectRequest) {
-      return this.extractProjectRequestSection(directProjectRequest);
-    }
-
-    const promptValue = this.readString(inputs.prompt);
-    if (promptValue) {
-      return this.extractProjectRequestSection(promptValue);
-    }
-
-    return undefined;
-  }
-
-  private extractProjectRequestSection(value: string): string {
-    const trimmed = value.trim();
-    const marker = "Project request:\n";
-    const markerIndex = trimmed.indexOf(marker);
-
-    if (markerIndex === -1) {
-      return trimmed;
-    }
-
-    const afterMarker = trimmed.slice(markerIndex + marker.length);
-    const nextSectionMatch = afterMarker.match(/\n\n[A-Z][A-Za-z ]+:\n/);
-
-    if (!nextSectionMatch || typeof nextSectionMatch.index !== "number") {
-      return afterMarker.trim();
-    }
-
-    return afterMarker.slice(0, nextSectionMatch.index).trim();
-  }
-
-  private extractUpdateRequestSection(value: string): string {
-    const trimmed = value.trim();
-    const marker = "Update request:\n";
-    const markerIndex = trimmed.indexOf(marker);
-
-    if (markerIndex === -1) {
-      return this.extractProjectRequestSection(trimmed);
-    }
-
-    const afterMarker = trimmed.slice(markerIndex + marker.length);
-    const nextSectionMatch = afterMarker.match(/\n\n[A-Z][A-Za-z ]+:\n/);
-
-    if (!nextSectionMatch || typeof nextSectionMatch.index !== "number") {
-      return afterMarker.trim();
-    }
-
-    return afterMarker.slice(0, nextSectionMatch.index).trim();
-  }
-
-  private readMilestoneReviewProjectBrief(
-    inputs: Record<string, unknown>,
-  ): string | undefined {
-    const rawProjectRequest =
-      this.readRawProjectRequest(inputs) ??
-      this.readString(inputs.request) ??
-      this.readString(inputs.userPrompt);
-
-    if (!rawProjectRequest) {
-      return undefined;
-    }
-
-    const normalized = rawProjectRequest.replace(/\s+/g, " ").trim();
-    const looksLikeRenderedPrompt =
-      normalized.includes("Global Guidance:") ||
-      normalized.includes("Role Guidance:") ||
-      normalized.includes("Intent Guidance:") ||
-      normalized.includes("Task Context:") ||
-      normalized.includes("Output Guidance:");
-
-    if (looksLikeRenderedPrompt) {
-      return undefined;
-    }
-
-    return normalized.length > 280
-      ? `${normalized.slice(0, 277).replace(/\s+$/u, "")}...`
-      : normalized;
-  }
-
-  private renderMilestoneExecutionEvidence(
-    tasks: Record<string, unknown>[],
-  ): string | undefined {
-    if (tasks.length === 0) {
-      return this.renderRawSection("Milestone Evidence Summary", [
-        "No milestone execution evidence was provided. Base the review on the stated scope and acceptance criteria, and explain any uncertainty clearly.",
-      ]);
-    }
-
-    const lines: string[] = [];
-
-    for (const [index, task] of tasks.entries()) {
-      if (index >= 6) {
-        break;
-      }
-
-      const taskId =
-        this.readString(task.taskId) ??
-        this.readString(task._id) ??
-        `task-${index + 1}`;
-      const intent = this.readString(task.intent);
-      const targetAgentId = this.readString(task.targetAgentId);
-      const status = this.readString(task.status) ?? "unknown";
-      const summary =
-        this.readString(task.summary) ??
-        this.readString(task.resultSummary) ??
-        this.readString(task.findingSummary);
-
-      lines.push(
-        `${index + 1}. Task ${taskId}: status=${status}${intent ? `, intent=${intent}` : ""}${targetAgentId ? `, target=${targetAgentId}` : ""}`,
-      );
-
-      if (summary) {
-        lines.push(`   summary: ${summary}`);
-      }
-
-      const acceptanceCriteria = this.readStringArray(
-        task.acceptanceCriteria,
-      ).slice(0, 2);
-      if (acceptanceCriteria.length > 0) {
-        lines.push(`   acceptance checks: ${acceptanceCriteria.join("; ")}`);
-      }
-
-      const outputs = this.readRecord(task.outputs);
-      if (outputs) {
-        const outputKeys = Object.keys(outputs);
-        if (outputKeys.length > 0) {
-          lines.push(`   output keys: ${outputKeys.slice(0, 6).join(", ")}`);
-        }
-      }
-
-      const artifacts = this.readStringArray(task.artifacts);
-      if (artifacts.length > 0) {
-        lines.push(`   artifacts: ${artifacts.slice(0, 4).join(", ")}`);
-      }
-
-      const errors = this.readStringArray(task.errors);
-      const lastError = this.readString(task.lastError);
-      const issues = [...errors.slice(0, 2), ...(lastError ? [lastError] : [])];
-      if (issues.length > 0) {
-        lines.push(`   issues: ${issues.join("; ")}`);
-      }
-    }
-
-    if (tasks.length > 6) {
-      lines.push(
-        `Additional evidence entries omitted: ${String(tasks.length - 6)}`,
-      );
-    }
-
-    return this.renderRawSection("Milestone Evidence Summary", lines);
-  }
-
-  private renderMilestoneReviewOutputGuidance(): string | undefined {
-    return this.renderRawSection(promptConfig.sections.output, [
-      'Use this exact response envelope: {"taskId":"<task-id>","status":"succeeded|failed","summary":"","outputs":{"decision":"pass|patch","summary":"","metAcceptanceCriteria":[],"missingOrBrokenItems":[],"patchMilestone":{"title":"","goal":"","description":"","scope":[],"acceptanceCriteria":[]}},"artifacts":[],"errors":[]}',
-      'Set outputs.decision to either "pass" or "patch".',
-      "Ground the decision in the milestone scope, acceptance criteria, and the evidence summary above.",
-      "If the milestone passes, briefly explain which acceptance criteria were met.",
-      "If a patch is needed, include outputs.patchMilestone with only the smallest valid follow-up milestone needed to satisfy the current milestone.",
-      "outputs.patchMilestone must include: title (string), goal (string), description (string), scope (string[]), acceptanceCriteria (string[]).",
-      'Recommended outputs shape: {"decision":"pass|patch","summary":"","metAcceptanceCriteria":[],"missingOrBrokenItems":[],"patchMilestone":{"title":"","goal":"","description":"","scope":[],"acceptanceCriteria":[]}}',
-      "Do not create execution tasks. Only approve the milestone or define the patch milestone.",
-    ]);
-  }
-
-  private readEnrichmentPayload(
-    value: unknown,
-  ): Record<string, unknown> | undefined {
-    const record = this.readRecord(value);
-    if (!record) {
-      return undefined;
-    }
-
-    return this.readRecord(record.enrichment) ?? record;
-  }
-
-  private renderSourceTask(
-    sourceTask?: Record<string, unknown>,
-  ): string | undefined {
-    if (!sourceTask) {
-      return undefined;
-    }
-
-    return this.renderRawSection("Source Task", [
-      this.stringifyValue(sourceTask),
-    ]);
-  }
-
-  private renderTaskPlan(
-    tasks?: Record<string, unknown>[],
-  ): string | undefined {
-    if (!tasks || tasks.length === 0) {
-      return undefined;
-    }
-
-    const lines: string[] = [];
-
-    for (const [index, task] of tasks.entries()) {
-      if (index >= 12) {
-        break;
-      }
-
-      const localId =
-        this.readString(task.localId) ??
-        this.readString(task.taskId) ??
-        `task-${index + 1}`;
-      const intent = this.readString(task.intent) ?? "unknown";
-      const targetAgentId =
-        this.readString(task.targetAgentId) ??
-        this.readString(this.readRecord(task.target)?.agentId);
-      const dependsOn = this.readStringArray(task.dependsOn);
-      const prompt = this.readString(this.readRecord(task.inputs)?.prompt);
-
-      lines.push(
-        `${index + 1}. ${localId}: intent=${intent}${targetAgentId ? `, target=${targetAgentId}` : ""}${dependsOn.length > 0 ? `, dependsOn=${dependsOn.join(", ")}` : ""}`,
-      );
-
-      if (prompt) {
-        lines.push(`   prompt: ${this.compactTaskReminder(prompt) ?? prompt}`);
-      }
-    }
-
-    if (tasks.length > 12) {
-      lines.push(
-        `Additional planned tasks omitted: ${String(tasks.length - 12)}`,
-      );
-    }
-
-    return this.renderRawSection("Task Plan", lines);
-  }
-
-  private renderDependencyTaskContext(
-    tasks?: Record<string, unknown>[],
-  ): string | undefined {
-    if (!tasks || tasks.length === 0) {
-      return undefined;
-    }
-
-    const lines: string[] = [];
-
-    for (const [index, task] of tasks.entries()) {
-      if (index >= 8) {
-        break;
-      }
-
-      const taskId =
-        this.readString(task.taskId) ??
-        this.readString(task._id) ??
-        this.readString(task.localId) ??
-        `dependency-${index + 1}`;
-      const intent = this.readString(task.intent);
-      const status = this.readString(task.status);
-      const summary =
-        this.readString(task.summary) ??
-        this.readString(task.resultSummary) ??
-        this.readString(task.findingSummary);
-
-      lines.push(
-        `${index + 1}. ${taskId}${intent ? `: intent=${intent}` : ""}${status ? `, status=${status}` : ""}`,
-      );
-
-      if (summary) {
-        lines.push(`   summary: ${summary}`);
-      }
-    }
-
-    if (tasks.length > 8) {
-      lines.push(
-        `Additional dependency context entries omitted: ${String(tasks.length - 8)}`,
-      );
-    }
-
-    return this.renderRawSection("Dependency Task Context", lines);
-  }
-
-  private renderMilestoneTaskGraphSection(
-    graph?: Record<string, unknown>,
-  ): string | undefined {
-    if (!graph) {
-      return undefined;
-    }
-
-    const currentTaskId = this.readString(graph.currentTaskId);
-    const tasks = this.readRecordArray(graph.tasks);
-    const lines = [
-      ...this.optionalLine("Current task id", currentTaskId),
-      ...(tasks.length > 0
-        ? [`Task graph size: ${String(tasks.length)}`]
-        : ["Task graph size: 0"]),
-    ];
-
-    return this.renderRawSection("Milestone Task Graph", lines);
-  }
-
-  private renderEnrichmentContext(
-    enrichment?: Record<string, unknown>,
-  ): string | undefined {
-    if (!enrichment) {
-      return undefined;
-    }
-
-    return this.renderRawSection("Enrichment Context", [
-      this.stringifyValue(enrichment),
-    ]);
-  }
-
-  private renderRelatedEnrichmentTask(
-    enrichmentTask?: Record<string, unknown>,
-  ): string | undefined {
-    if (!enrichmentTask) {
-      return undefined;
-    }
-
-    return this.renderRawSection("Related Enrichment Task", [
-      this.stringifyValue(enrichmentTask),
-    ]);
-  }
-
-  private readString(value: unknown): string | undefined {
-    return typeof value === "string" && value.trim().length > 0
-      ? value.trim()
-      : undefined;
-  }
-
-  private readNumber(value: unknown): number | undefined {
-    return typeof value === "number" && Number.isFinite(value)
-      ? value
-      : undefined;
-  }
-
-  private readStringArray(value: unknown): string[] {
-    if (!Array.isArray(value)) {
-      return [];
-    }
-
-    return value.filter((item): item is string => typeof item === "string");
-  }
-
-  private readRecordArray(value: unknown): Record<string, unknown>[] {
-    if (!Array.isArray(value)) {
-      return [];
-    }
-
-    return value.filter(
-      (item): item is Record<string, unknown> =>
-        Boolean(item) && typeof item === "object" && !Array.isArray(item),
-    );
-  }
-
-  private readRecord(value: unknown): Record<string, unknown> | undefined {
-    return value && typeof value === "object" && !Array.isArray(value)
-      ? (value as Record<string, unknown>)
-      : undefined;
-  }
-
-  private optionalLine(label: string, value?: string): string[] {
-    return value ? [`${label}: ${value}`] : [];
-  }
-
-  private readTaskPrompt(inputs: Record<string, unknown>): string {
-    const promptValue = inputs.prompt;
-
-    if (typeof promptValue === "string" && promptValue.trim().length > 0) {
-      return promptValue.trim();
-    }
-
-    const fallback = [
-      this.readString(inputs.taskPrompt),
-      this.readString(inputs.description),
-      this.readString(inputs.summary),
-      this.readString(inputs.instruction),
-      this.readString(inputs.instructions),
-      this.readString(inputs.userPrompt),
-    ].find((value) => Boolean(value));
-
-    if (fallback) {
-      return fallback;
-    }
-
-    return "Complete the assigned task using the provided acceptance criteria and constraints.";
-  }
-
-  private normalizeConstraints(constraints?: {
-    toolProfile?: string;
-    sandbox?: "off" | "non-main" | "all";
-    maxTokens?: number;
-    maxCost?: number;
-  }): string[] | undefined {
-    if (!constraints) {
-      return undefined;
-    }
-
-    const items = [
-      ...(constraints.toolProfile
-        ? [`Tool profile: ${constraints.toolProfile}`]
-        : []),
-      ...(constraints.sandbox ? [`Sandbox mode: ${constraints.sandbox}`] : []),
-      ...(typeof constraints.maxTokens === "number"
-        ? [`Max tokens: ${constraints.maxTokens}`]
-        : []),
-      ...(typeof constraints.maxCost === "number"
-        ? [`Max cost: ${constraints.maxCost}`]
-        : []),
-    ];
-
-    return items.length > 0 ? items : undefined;
-  }
-
-  private renderList(
-    title: string,
-    items?: readonly string[],
-  ): string | undefined {
-    if (!items || items.length === 0) {
-      return undefined;
-    }
-
-    return `${title}:\n${items.map((item) => `- ${item}`).join("\n")}`;
-  }
-
-  private renderRawSection(
-    title: string,
-    lines?: readonly string[],
-  ): string | undefined {
-    if (!lines || lines.length === 0) {
-      return undefined;
-    }
-
-    const cleaned = lines.filter((line) => line !== undefined && line !== null);
-    if (cleaned.length === 0) {
-      return undefined;
-    }
-
-    return `${title}:\n${cleaned.join("\n")}`;
-  }
-
-  private joinSections(sections: Array<string | undefined>): string {
-    return sections
-      .filter((section): section is string => Boolean(section))
-      .join("\n\n");
-  }
-
-  private stringifyValue(value: unknown): string {
-    if (typeof value === "string") {
-      return value;
-    }
-
-    try {
-      return JSON.stringify(value, null, 2);
-    } catch {
-      return String(value);
-    }
-  }
-
-  private indent(value: string, prefix = "  "): string {
-    return value
-      .split("\n")
-      .map((line) => `${prefix}${line}`)
-      .join("\n");
+    return buildRetryBlock(input);
   }
 }
 

@@ -363,6 +363,7 @@ export const promptConfig = {
         "Base the decision on the milestone evidence summary below and the milestone acceptance criteria.",
       ],
       allowedDecisionPrefix: "Allowed decisions",
+      defaultAllowedDecisions: ["pass", "patch"],
       noEvidence:
         "No milestone execution evidence was provided. Base the review on the stated scope and acceptance criteria, and explain any uncertainty clearly.",
       outputGuidance: [
